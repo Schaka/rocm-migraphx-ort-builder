@@ -9,14 +9,9 @@ on:
         description: 'Single gfx arch to build (e.g. gfx1201). Leave empty for the full nightly matrix.'
         required: false
         default: ''
-  push:
-    branches: [main]
-    paths:
-      - Dockerfile
-      - .github/workflows/nightly.yml
 
 env:
-  IMAGE: ghcr.io/${{ github.repository }}
+  IMAGE: ghcr.io/${{ toLower(github.repository) }}
 
 jobs:
   set-matrix:
