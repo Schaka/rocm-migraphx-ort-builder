@@ -10,9 +10,6 @@ on:
         required: false
         default: ''
 
-env:
-  IMAGE: ghcr.io/${{ toLower(github.repository) }}
-
 jobs:
   set-matrix:
     runs-on: ubuntu-latest
@@ -40,6 +37,8 @@ jobs:
         arch: ${{ fromJSON(needs.set-matrix.outputs.arches) }}
     steps:
       - uses: actions/checkout@v4
+
+      - run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
 
       # Fat multi-arch image (all ROCM_ARCH targets baked into one binary) is
       # infeasible on hosted runners: official rocm/pytorch, which bakes in
