@@ -1,0 +1,81 @@
+name: Nightly build
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: 'Single gfx arch to build (e.g. gfx1201). Leave empty for the full nightly matrix.'
+        required: false
+        default: ''
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - .github/workflows/nightly.yml
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  set-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      arches: ${{ steps.set.outputs.arches }}
+    steps:
+      - id: set
+        run: |
+          if [ -n "${{ github.event.inputs.arch }}" ]; then
+            echo "arches=[\"${{ github.event.inputs.arch }}\"]" >> "$GITHUB_OUTPUT"
+          else
+            echo 'arches=["gfx900","gfx906","gfx908","gfx90a","gfx942","gfx1030","gfx1100","gfx1101","gfx1102","gfx1150","gfx1151","gfx1200","gfx1201"]' >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: set-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(needs.set-matrix.outputs.arches) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fat multi-arch image (all ROCM_ARCH targets baked into one binary) is
+      # infeasible on hosted runners: official rocm/pytorch, which bakes in
+      # only 5 archs, runs ~54GB uncompressed -- past the ~14GB disk hosted
+      # runners ship with, even after cleanup. Building/tagging one image per
+      # arch instead keeps each job's disk footprint to a single arch's worth
+      # of kernel binaries.
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          docker-images: false
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: date
+        run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest-${{ matrix.arch }}
+            ${{ env.IMAGE }}:${{ steps.date.outputs.date }}-${{ matrix.arch }}
+          build-args: |
+            ROCM_ARCH=${{ matrix.arch }}
+          cache-from: type=registry,ref=${{ env.IMAGE }}:cache-${{ matrix.arch }}
+          cache-to: type=registry,ref=${{ env.IMAGE }}:cache-${{ matrix.arch }},mode=max
