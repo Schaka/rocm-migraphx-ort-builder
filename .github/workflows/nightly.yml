@@ -9,6 +9,11 @@ on:
         description: 'Single gfx arch to build (e.g. gfx1201). Leave empty for the full nightly matrix.'
         required: false
         default: ''
+      debug:
+        description: 'Open an SSH debug session (tmate) into the runner for the duration of the build'
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   set-matrix:
@@ -38,6 +43,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - if: github.event_name == 'workflow_dispatch' && inputs.debug
+        uses: mxschmitt/action-tmate@v3
+        with:
+          detached: true
+          limit-access-to-actor: true
+
       - run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
 
       # Fat multi-arch image (all ROCM_ARCH targets baked into one binary) is
@@ -50,6 +61,7 @@ jobs:
         with:
           tool-cache: false
           docker-images: false
+          swap-storage: false
 
       - uses: docker/setup-buildx-action@v3
 
