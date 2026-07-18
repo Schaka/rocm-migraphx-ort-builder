@@ -318,7 +318,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # be 3.12, not this stage's native interpreter, via the same uv-managed
 # standalone Python as the builder stages (uv itself + the 3.12 interpreter
 # both inherited from python-base, no re-download needed here).
-ENV PYTHONPATH=/opt/rocm/lib:${PYTHONPATH}
+ENV PYTHONPATH=/opt/rocm/lib
 ENV VIRTUAL_ENV=/opt/venv
 # --seed: uv venvs ship no pip binary by default, but this image is a drop-in
 # for rocm/onnxruntime:* bases whose venvs do -- downstream Dockerfiles may
