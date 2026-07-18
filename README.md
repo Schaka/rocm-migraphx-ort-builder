@@ -3,13 +3,31 @@
 MIGraphX + ONNX Runtime + PyTorch, all built from source against a ROCm
 release with no prebuilt packages for any of them yet, e.g. `rocm/dev-ubuntu-*`
 images ahead of what `rocm/onnxruntime`/`rocm/pytorch` publish. Built nightly,
-published to `ghcr.io/<owner>/rocm-migraphx-ort-builder`.
+the combined image published to
+`ghcr.io/<owner>/rocm-migraphx-ort-torch-builder`.
 
 Baking every arch in `ROCM_ARCH` into one image isn't feasible on GitHub-hosted
 runners -- AMD's own `rocm/pytorch` image, which only bakes in 5 archs, is
 ~54GB uncompressed, well past what a hosted runner's disk holds. CI instead
-builds and pushes one tag per arch (`docker/build-push-action` matrix over
-`ROCM_ARCH`'s values), rather than one fat multi-arch image.
+builds and pushes one tag per arch (a matrix over `ROCM_ARCH`'s values), rather
+than one fat multi-arch image.
+
+The build is also split by component across separate CI jobs: MIGraphX, PyTorch
+and ONNX Runtime each compile from source on their own runner (each with its
+own ~6h budget -- one monolithic build of all three overran the hosted-runner
+ceiling), and each publishes an intermediate image the next job pulls from
+instead of recompiling. MIGraphX and PyTorch are independent and run in
+parallel; ONNX Runtime builds against MIGraphX's `/opt/rocm`; a final job
+assembles all three. Each component lands in its own package:
+
+- `rocm-migraphx-builder:<arch>` -- from-source MIGraphX + ROCm deps in `/opt/rocm`
+- `rocm-migraphx-torch-builder:<arch>` -- PyTorch wheel
+- `rocm-migraphx-ort-builder:<arch>` -- ONNX Runtime wheel (built against MIGraphX)
+- `rocm-migraphx-ort-torch-builder:latest-<arch>` / `:<YYYYMMDD>-<arch>` -- the
+  combined image, all three installed
+
+The first three are build plumbing (each an incomplete slice of the stack);
+downstream consumers want the combined `rocm-migraphx-ort-torch-builder`.
 
 Torch is also built from source rather than reusing AMD's `rocm/pytorch`
 image: current `rocm/pytorch` tags ship TheRock's pip-packaged ROCm SDK (no
@@ -29,21 +47,24 @@ tag: onnxruntime (built `--use_rocm --use_migraphx`) and torch both live in a
 venv at `/opt/venv` (on `PATH`), and `/opt/rocm` has the from-source MIGraphX
 plus its ROCm runtime deps.
 
-Tags are per-arch: `:latest-<arch>` (e.g. `:latest-gfx1201`) and
-`:<YYYYMMDD>-<arch>` for pinned builds -- there is no plain `:latest`, pick the
-tag matching your GPU's `ROCM_ARCH` value.
+The combined image (`rocm-migraphx-ort-torch-builder`) is tagged per-arch:
+`:latest-<arch>` (e.g. `:latest-gfx1201`) and `:<YYYYMMDD>-<arch>` for pinned
+builds -- there is no plain `:latest`, pick the tag matching your GPU's
+`ROCM_ARCH` value.
 
 ```dockerfile
-ARG BASE_IMAGE=ghcr.io/<owner>/rocm-migraphx-ort-builder:latest-gfx1201
+ARG BASE_IMAGE=ghcr.io/<owner>/rocm-migraphx-ort-torch-builder:latest-gfx1201
 FROM ${BASE_IMAGE}
 RUN python3 -c "import onnxruntime as ort; print(ort.get_available_providers())"
 ```
 
 ## Build args
 
-- `BASE_IMAGE` (default `rocm/dev-ubuntu-24.04:7.14.0-full`) - the ROCm base.
-  Pinned to 24.04 (Python 3.12) since downstream apps like AudioMuse-AI pin
-  `numpy` to a version that only resolves against onnx's deps under 3.12.
+- `BASE_IMAGE` (default `rocm/dev-ubuntu-26.04:7.14.0-full`) - the ROCm base.
+  Its native `python3` is 3.14, but downstream apps like AudioMuse-AI pin
+  `numpy` to a version that only resolves against onnx's deps under 3.12, so
+  every wheel built here and the final `/opt/venv` all target a uv-managed
+  Python 3.12 instead of the base image's interpreter.
 - `ROCM_ARCH` (default `gfx900;gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;
   gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201`) - semicolon-separated
   `GPU_TARGETS`/`CMAKE_HIP_ARCHITECTURES`/`PYTORCH_ROCM_ARCH` list, matching
@@ -82,3 +103,12 @@ gh workflow run nightly.yml -f arch=gfx1201
 
 or via the Actions tab -> "Nightly build" -> "Run workflow", filling in the
 `arch` input. Leaving it empty runs the full matrix, same as the schedule.
+Even a single-arch run fans out to the four component jobs (migraphx, pytorch,
+ort, final) via the reusable `build-component.yml` workflow. The `debug` input
+opens a detached tmate SSH session into the runner for the build's duration
+(manual runs only) when a component needs live inspection.
+
+On first run each of the four packages is created **private** and linked to
+this repo; flip each to public in its ghcr package settings if downstream pulls
+need to be anonymous. `GITHUB_TOKEN` (with `packages: write`) handles the
+push -- no PAT required.
