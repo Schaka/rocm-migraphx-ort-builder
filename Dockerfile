@@ -21,6 +21,25 @@
 # Build: docker build -t <tag> .
 ARG BASE_IMAGE=rocm/dev-ubuntu-26.04:7.14.0-full
 
+# Component-image references. Downstream stages COPY each component's artifacts
+# from these, so in CI every component can be built as its own job/image (see
+# .github/workflows) and a later stage just pulls the prebuilt result instead
+# of recompiling it. Defaults point at the local stage names, so a plain
+# `docker build .` on one machine still resolves them to the in-tree stages and
+# builds everything in a single shot -- BuildKit treats `COPY --from=<name>` as
+# a stage reference when <name> matches a stage, else as an image to pull.
+ARG MIGRAPHX_IMAGE=migraphx-builder
+ARG PYTORCH_IMAGE=pytorch-builder
+ARG ORT_IMAGE=ort-builder
+
+# Cache-bust token for the develop-tracking MIGraphX clone below. A moving
+# branch's `git clone` layer has a cache key that never changes, so it would
+# cache-hit forever and keep rebuilding the same stale commit every night --
+# CI passes the build date here so each nightly run re-clones develop. Any
+# changing value works; left constant locally (pinned deps like PyTorch/ORT
+# don't need it -- their tags already change the cache key when bumped).
+ARG SOURCE_DATE=unknown
+
 # Shared ancestor for every stage below: this base image's native python3 is
 # 3.14, but AudioMuse-AI (and other downstream consumers) pin numpy in a way
 # that only resolves against onnx's deps under 3.12 -- so every wheel built
@@ -82,7 +101,13 @@ RUN uv venv /rbuild-venv --python 3.12 \
     && uv pip install --python /rbuild-venv/bin/python3 \
         https://github.com/RadeonOpenCompute/rbuild/archive/master.tar.gz
 
-RUN git clone --branch develop --depth 1 \
+# SOURCE_DATE (see top of file) is referenced here purely to bust this layer's
+# cache when it changes -- develop is a moving branch, so without it the clone
+# would reuse a stale commit on every nightly rebuild. Its downstream compile
+# layer busts with it, which is intended: fresh develop each night.
+ARG SOURCE_DATE
+RUN echo "MIGraphX develop snapshot: ${SOURCE_DATE}" \
+    && git clone --branch develop --depth 1 \
         https://github.com/ROCm/AMDMIGraphX.git /migraphx-src
 
 WORKDIR /migraphx-src
@@ -198,12 +223,22 @@ RUN --mount=type=cache,target=/root/.ccache,id=pytorch-ccache \
         USE_DISTRIBUTED=0 \
         python3 setup.py bdist_wheel
 
+# Indirection stages: `COPY --from=$VAR` isn't allowed (BuildKit rejects a
+# variable in --from), so resolve each component-image ARG through a FROM with
+# a static alias, then COPY from the alias. With the defaults these aliases are
+# just the local builder stages (one-shot `docker build .` compiles everything
+# and BuildKit dedups the shared migraphx-builder); in CI the ARGs are passed
+# as prebuilt image refs, so these become plain image pulls and the local
+# builder stages drop out of the target's graph entirely -- no recompilation.
+FROM ${MIGRAPHX_IMAGE} AS migraphx-export
+FROM ${PYTORCH_IMAGE} AS pytorch-export
+
 FROM python-base AS ort-builder
 
 ARG ROCM_ARCH="gfx900;gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201"
 ARG ORT_VERSION=v1.23.2
 
-COPY --from=migraphx-builder /opt/rocm /opt/rocm
+COPY --from=migraphx-export /opt/rocm /opt/rocm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git cmake ninja-build build-essential pkg-config ccache \
@@ -253,9 +288,13 @@ RUN --mount=type=cache,target=/root/.ccache,id=ort-ccache \
         --cmake_extra_defines "CMAKE_CXX_COMPILER_LAUNCHER=ccache" \
     && mkdir -p /onnxruntime/dist && cp /onnxruntime/build/Release/dist/*.whl /onnxruntime/dist/
 
+# ort-export alias: same indirection as migraphx-export/pytorch-export above,
+# declared here (after ort-builder) so its default resolves to that stage.
+FROM ${ORT_IMAGE} AS ort-export
+
 FROM python-base
 
-COPY --from=migraphx-builder /opt/rocm /opt/rocm
+COPY --from=migraphx-export /opt/rocm /opt/rocm
 
 # Unlike rocm/onnxruntime (which ships an /etc/ld.so.conf.d entry for its
 # ROCm lib dir), this base image (rocm/dev-ubuntu-*) doesn't register
@@ -286,8 +325,8 @@ ENV VIRTUAL_ENV=/opt/venv
 # call "$VIRTUAL_ENV/bin/pip" directly.
 RUN uv venv $VIRTUAL_ENV --python 3.12 --seed
 
-COPY --from=ort-builder /onnxruntime/dist/*.whl /tmp/ort/
-COPY --from=pytorch-builder /pytorch/dist/*.whl /tmp/torch/
+COPY --from=ort-export /onnxruntime/dist/*.whl /tmp/ort/
+COPY --from=pytorch-export /pytorch/dist/*.whl /tmp/torch/
 RUN uv pip install --python "$VIRTUAL_ENV/bin/python3" --no-cache numpy /tmp/ort/*.whl /tmp/torch/*.whl \
     && rm -rf /tmp/ort /tmp/torch \
     && "$VIRTUAL_ENV/bin/python3" -c "import onnxruntime as ort; p=ort.get_available_providers(); print('ORT providers:', p); assert 'MIGraphXExecutionProvider' in p" \
