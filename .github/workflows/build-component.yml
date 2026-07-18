@@ -43,6 +43,11 @@ on:
         required: false
         type: boolean
         default: false
+      migraphx-ref:
+        description: 'Git ref to build MIGraphX from (branch/tag). "develop" (default) keeps the normal nightly tag scheme; any other ref suffixes the migraphx/ort/final image tags with it so a pinned build does not collide with the develop-tracking one.'
+        required: false
+        type: string
+        default: develop
       debug:
         description: 'Open an SSH debug session (tmate) into the runner for the duration of the build'
         required: false
@@ -111,22 +116,41 @@ jobs:
             esac
           }
           arch="${{ inputs.arch }}"
-          self="$(pkg "${{ inputs.component }}")"
+          component="${{ inputs.component }}"
+          self="$(pkg "${component}")"
+
+          # migraphx-ref only changes what the migraphx component actually
+          # builds, but ort and final both COPY its /opt/rocm output, so they
+          # (and their own published tags) need to key off the same ref too --
+          # otherwise a pinned-ref rebuild would silently overwrite the
+          # develop-tracking ort/final tags, or reuse a stale develop-built
+          # migraphx layer via cache. pytorch is independent of MIGraphX
+          # entirely, so it always keeps the plain arch tag/cache regardless
+          # of migraphx-ref, and doesn't need rebuilding per-ref.
+          ref="${{ inputs.migraphx-ref }}"
+          suffix=""
+          if [ "$ref" != "develop" ] && [ "$component" != "pytorch" ]; then
+            suffix="-$(echo "$ref" | tr -c 'A-Za-z0-9' '-')"
+          fi
+          tag_arch="${arch}${suffix}"
 
           {
             echo "build-args<<ARGS_EOF"
             echo "ROCM_ARCH=${arch}"
-            if [ "${{ inputs.component }}" = "migraphx" ]; then
-              echo "SOURCE_DATE=${{ steps.date.outputs.date }}"
+            if [ "${component}" = "migraphx" ]; then
+              echo "MIGRAPHX_REF=${ref}"
+              if [ "$ref" = "develop" ]; then
+                echo "SOURCE_DATE=${{ steps.date.outputs.date }}"
+              fi
             fi
             if [ "${{ inputs.with-migraphx-image }}" = "true" ]; then
-              echo "MIGRAPHX_IMAGE=$(pkg migraphx):${arch}"
+              echo "MIGRAPHX_IMAGE=$(pkg migraphx):${arch}${suffix}"
             fi
             if [ "${{ inputs.with-pytorch-image }}" = "true" ]; then
               echo "PYTORCH_IMAGE=$(pkg pytorch):${arch}"
             fi
             if [ "${{ inputs.with-ort-image }}" = "true" ]; then
-              echo "ORT_IMAGE=$(pkg ort):${arch}"
+              echo "ORT_IMAGE=$(pkg ort):${arch}${suffix}"
             fi
             echo "ARGS_EOF"
           } >> "$GITHUB_OUTPUT"
@@ -134,15 +158,15 @@ jobs:
           if [ "${{ inputs.final }}" = "true" ]; then
             {
               echo "tags<<TAGS_EOF"
-              echo "${self}:latest-${arch}"
-              echo "${self}:${{ steps.date.outputs.date }}-${arch}"
+              echo "${self}:latest-${tag_arch}"
+              echo "${self}:${{ steps.date.outputs.date }}-${tag_arch}"
               echo "TAGS_EOF"
             } >> "$GITHUB_OUTPUT"
           else
-            echo "tags=${self}:${arch}" >> "$GITHUB_OUTPUT"
+            echo "tags=${self}:${tag_arch}" >> "$GITHUB_OUTPUT"
           fi
 
-          echo "cache-ref=${self}:cache-${arch}" >> "$GITHUB_OUTPUT"
+          echo "cache-ref=${self}:cache-${tag_arch}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/build-push-action@v6
         with:

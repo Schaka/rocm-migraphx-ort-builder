@@ -32,12 +32,22 @@ ARG MIGRAPHX_IMAGE=migraphx-builder
 ARG PYTORCH_IMAGE=pytorch-builder
 ARG ORT_IMAGE=ort-builder
 
+# Git ref to build MIGraphX from. Defaults to the moving `develop` branch;
+# override to pin a stable release branch (e.g.
+# release/rocm-rel-7.13) when develop regresses on a given GPU target and you
+# need a known-good build instead. Reflected in the CI image tag (see
+# nightly.yml) so a pinned build doesn't collide with/get overwritten by the
+# develop-tracking one.
+ARG MIGRAPHX_REF=develop
+
 # Cache-bust token for the develop-tracking MIGraphX clone below. A moving
 # branch's `git clone` layer has a cache key that never changes, so it would
 # cache-hit forever and keep rebuilding the same stale commit every night --
 # CI passes the build date here so each nightly run re-clones develop. Any
 # changing value works; left constant locally (pinned deps like PyTorch/ORT
-# don't need it -- their tags already change the cache key when bumped).
+# don't need it -- their tags already change the cache key when bumped). Not
+# needed when MIGRAPHX_REF pins a fixed branch/tag, since that ref's own
+# commits already change the cache key when it moves.
 ARG SOURCE_DATE=unknown
 
 # Shared ancestor for every stage below: this base image's native python3 is
@@ -106,8 +116,9 @@ RUN uv venv /rbuild-venv --python 3.12 \
 # would reuse a stale commit on every nightly rebuild. Its downstream compile
 # layer busts with it, which is intended: fresh develop each night.
 ARG SOURCE_DATE
-RUN echo "MIGraphX develop snapshot: ${SOURCE_DATE}" \
-    && git clone --branch develop --depth 1 \
+ARG MIGRAPHX_REF
+RUN echo "MIGraphX ${MIGRAPHX_REF} snapshot: ${SOURCE_DATE}" \
+    && git clone --branch "${MIGRAPHX_REF}" --depth 1 \
         https://github.com/ROCm/AMDMIGraphX.git /migraphx-src
 
 WORKDIR /migraphx-src

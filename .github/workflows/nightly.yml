@@ -9,6 +9,10 @@ on:
         description: 'Single gfx arch to build (e.g. gfx1201). Leave empty for the full nightly matrix.'
         required: false
         default: ''
+      migraphx-ref:
+        description: 'Git ref to build MIGraphX from (branch/tag), e.g. release/rocm-rel-7.13. Leave as develop for the normal nightly build.'
+        required: false
+        default: 'develop'
       debug:
         description: 'Open an SSH debug session (tmate) into the runner for the duration of the build'
         type: boolean
@@ -55,6 +59,7 @@ jobs:
       arch: ${{ matrix.arch }}
       component: migraphx
       target: migraphx-builder
+      migraphx-ref: ${{ github.event_name == 'workflow_dispatch' && inputs.migraphx-ref || 'develop' }}
       debug: ${{ github.event_name == 'workflow_dispatch' && inputs.debug }}
 
   pytorch:
@@ -91,6 +96,7 @@ jobs:
       component: ort
       target: ort-builder
       with-migraphx-image: true
+      migraphx-ref: ${{ github.event_name == 'workflow_dispatch' && inputs.migraphx-ref || 'develop' }}
       debug: ${{ github.event_name == 'workflow_dispatch' && inputs.debug }}
 
   final:
@@ -112,4 +118,5 @@ jobs:
       with-migraphx-image: true
       with-pytorch-image: true
       with-ort-image: true
+      migraphx-ref: ${{ github.event_name == 'workflow_dispatch' && inputs.migraphx-ref || 'develop' }}
       debug: ${{ github.event_name == 'workflow_dispatch' && inputs.debug }}
