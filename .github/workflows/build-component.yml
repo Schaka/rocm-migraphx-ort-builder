@@ -130,7 +130,7 @@ jobs:
           ref="${{ inputs.migraphx-ref }}"
           suffix=""
           if [ "$ref" != "develop" ] && [ "$component" != "pytorch" ]; then
-            suffix="-$(echo "$ref" | tr -c 'A-Za-z0-9' '-')"
+            suffix="-$(echo "$ref" | tr -sc 'A-Za-z0-9' '-' | sed 's/^-*//;s/-*$//')"
           fi
           tag_arch="${arch}${suffix}"
 
