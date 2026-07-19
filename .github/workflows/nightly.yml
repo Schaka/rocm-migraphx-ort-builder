@@ -19,17 +19,11 @@ on:
         required: false
         default: false
 
-# The build is split into four component jobs (migraphx, pytorch, ort, final),
-# each calling build-component.yml on its own runner with its own 360-minute
-# budget -- one monolithic build of all three from-source compiles couldn't fit
-# under the hosted-runner 6h ceiling. migraphx and pytorch are independent and
-# run in parallel; ort COPYs migraphx's /opt/rocm, and final assembles all
-# three, so each depends on the images its predecessors push.
-#
-# `needs` is job-level, not matrix-cell-level: ort/final wait for the whole
-# upstream matrix. `if: !cancelled()` lets them run even when some upstream
-# arches failed -- each downstream arch then simply pulls its own arch's
-# prebuilt image, so a failed arch fails only its own downstream cells.
+# The actual migraphx -> ort -> final chain (plus the independent pytorch
+# build) lives in build-pipeline.yml, one full run of which is matrixed per
+# arch here. Each arch's pipeline is a separate reusable-workflow call, so
+# arches run fully independently of each other -- one arch's migraphx build
+# never blocks another arch's ort/final.
 jobs:
   set-matrix:
     runs-on: ubuntu-latest
@@ -44,7 +38,7 @@ jobs:
             echo 'arches=["gfx900","gfx906","gfx908","gfx90a","gfx942","gfx1030","gfx1100","gfx1101","gfx1102","gfx1150","gfx1151","gfx1200","gfx1201"]' >> "$GITHUB_OUTPUT"
           fi
 
-  migraphx:
+  build:
     needs: set-matrix
     permissions:
       contents: read
@@ -53,70 +47,9 @@ jobs:
       fail-fast: false
       matrix:
         arch: ${{ fromJSON(needs.set-matrix.outputs.arches) }}
-    uses: ./.github/workflows/build-component.yml
+    uses: ./.github/workflows/build-pipeline.yml
     secrets: inherit
     with:
       arch: ${{ matrix.arch }}
-      component: migraphx
-      target: migraphx-builder
-      migraphx-ref: ${{ github.event_name == 'workflow_dispatch' && inputs.migraphx-ref || 'develop' }}
-      debug: ${{ github.event_name == 'workflow_dispatch' && inputs.debug }}
-
-  pytorch:
-    needs: set-matrix
-    permissions:
-      contents: read
-      packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: ${{ fromJSON(needs.set-matrix.outputs.arches) }}
-    uses: ./.github/workflows/build-component.yml
-    secrets: inherit
-    with:
-      arch: ${{ matrix.arch }}
-      component: pytorch
-      target: pytorch-builder
-      debug: ${{ github.event_name == 'workflow_dispatch' && inputs.debug }}
-
-  ort:
-    needs: [set-matrix, migraphx]
-    if: ${{ !cancelled() }}
-    permissions:
-      contents: read
-      packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: ${{ fromJSON(needs.set-matrix.outputs.arches) }}
-    uses: ./.github/workflows/build-component.yml
-    secrets: inherit
-    with:
-      arch: ${{ matrix.arch }}
-      component: ort
-      target: ort-builder
-      with-migraphx-image: true
-      migraphx-ref: ${{ github.event_name == 'workflow_dispatch' && inputs.migraphx-ref || 'develop' }}
-      debug: ${{ github.event_name == 'workflow_dispatch' && inputs.debug }}
-
-  final:
-    needs: [set-matrix, migraphx, pytorch, ort]
-    if: ${{ !cancelled() }}
-    permissions:
-      contents: read
-      packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: ${{ fromJSON(needs.set-matrix.outputs.arches) }}
-    uses: ./.github/workflows/build-component.yml
-    secrets: inherit
-    with:
-      arch: ${{ matrix.arch }}
-      component: final
-      final: true
-      with-migraphx-image: true
-      with-pytorch-image: true
-      with-ort-image: true
       migraphx-ref: ${{ github.event_name == 'workflow_dispatch' && inputs.migraphx-ref || 'develop' }}
       debug: ${{ github.event_name == 'workflow_dispatch' && inputs.debug }}

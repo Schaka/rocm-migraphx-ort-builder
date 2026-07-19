@@ -1,0 +1,88 @@
+name: Build pipeline (single arch)
+
+# Runs the full migraphx -> ort -> final chain (plus the independent pytorch
+# build) for ONE arch. Called once per arch from a matrix in nightly.yml.
+#
+# This exists because `needs` in GitHub Actions is job-level, not
+# matrix-cell-level: if migraphx/ort/final were each their own matrixed job
+# (as they used to be), `ort: needs: migraphx` would block on the ENTIRE
+# migraphx matrix finishing before ANY ort cell starts, even though each ort
+# cell only actually depends on its own arch's migraphx image. Wrapping the
+# whole per-arch chain in one reusable workflow and matrixing THAT instead
+# means each arch's migraphx/pytorch/ort/final run back-to-back on their own
+# schedule, independent of every other arch.
+
+on:
+  workflow_call:
+    inputs:
+      arch:
+        required: true
+        type: string
+      migraphx-ref:
+        required: false
+        type: string
+        default: develop
+      debug:
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  migraphx:
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build-component.yml
+    secrets: inherit
+    with:
+      arch: ${{ inputs.arch }}
+      component: migraphx
+      target: migraphx-builder
+      migraphx-ref: ${{ inputs.migraphx-ref }}
+      debug: ${{ inputs.debug }}
+
+  pytorch:
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build-component.yml
+    secrets: inherit
+    with:
+      arch: ${{ inputs.arch }}
+      component: pytorch
+      target: pytorch-builder
+      debug: ${{ inputs.debug }}
+
+  ort:
+    needs: migraphx
+    if: ${{ !cancelled() }}
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build-component.yml
+    secrets: inherit
+    with:
+      arch: ${{ inputs.arch }}
+      component: ort
+      target: ort-builder
+      with-migraphx-image: true
+      migraphx-ref: ${{ inputs.migraphx-ref }}
+      debug: ${{ inputs.debug }}
+
+  final:
+    needs: [pytorch, ort]
+    if: ${{ !cancelled() }}
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build-component.yml
+    secrets: inherit
+    with:
+      arch: ${{ inputs.arch }}
+      component: final
+      final: true
+      with-migraphx-image: true
+      with-pytorch-image: true
+      with-ort-image: true
+      migraphx-ref: ${{ inputs.migraphx-ref }}
+      debug: ${{ inputs.debug }}

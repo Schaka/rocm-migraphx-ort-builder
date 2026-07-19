@@ -103,8 +103,9 @@ gh workflow run nightly.yml -f arch=gfx1201
 
 or via the Actions tab -> "Nightly build" -> "Run workflow", filling in the
 `arch` input. Leaving it empty runs the full matrix, same as the schedule.
-Even a single-arch run fans out to the four component jobs (migraphx, pytorch,
-ort, final) via the reusable `build-component.yml` workflow. The `debug` input
+Even a single-arch run fans out to the four component builds (migraphx, pytorch,
+ort, final) for that arch, via the reusable `build-pipeline.yml` workflow (which
+in turn calls `build-component.yml` per component). The `debug` input
 opens a detached tmate SSH session into the runner for the build's duration
 (manual runs only) when a component needs live inspection.
 
