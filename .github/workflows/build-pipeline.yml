@@ -55,7 +55,7 @@ jobs:
 
   ort:
     needs: migraphx
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && needs.migraphx.result == 'success' }}
     permissions:
       contents: read
       packages: write
@@ -71,7 +71,7 @@ jobs:
 
   final:
     needs: [pytorch, ort]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && needs.pytorch.result == 'success' && needs.ort.result == 'success' }}
     permissions:
       contents: read
       packages: write
