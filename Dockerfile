@@ -271,16 +271,14 @@ ENV PATH=/build-venv/bin:$PATH
 RUN git clone --recursive --branch ${ORT_VERSION} --depth 1 \
         https://github.com/microsoft/onnxruntime.git /onnxruntime
 
-# build.py's build_python_wheel() passes --use_rocm to setup.py bdist_wheel
-# when --use_rocm is set, but setup.py still has no handler for that flag as
-# of v1.27.1 (only --use_migraphx), so bdist_wheel rejects it as an
-# unrecognized option.
-RUN sed -i \
-        's/elif parse_arg_remove_boolean(sys.argv, "--use_migraphx"):/elif parse_arg_remove_boolean(sys.argv, "--use_rocm"):\n    parse_arg_remove_boolean(sys.argv, "--use_migraphx")\n    is_migraphx = True\n    package_name = "onnxruntime-rocm"\nelif parse_arg_remove_boolean(sys.argv, "--use_migraphx"):/' \
-        /onnxruntime/setup.py
-
 WORKDIR /onnxruntime
 
+# Standalone --use_rocm/--rocm_home are gone as of this ORT version (ROCm EP
+# folded away, see https://github.com/microsoft/onnxruntime/issues/26801) --
+# --rocm_home only survives as a deprecated no-op under the MIGraphX group.
+# Only --use_migraphx/--migraphx_home is needed; that's all this project ever
+# wanted anyway.
+#
 # Same ccache-mount reasoning as the earlier builder stages -- and same
 # reason it doesn't also cache-mount `build` itself (stale CMakeCache.txt
 # across attempts with different flags/mounts). Wheel is copied to
@@ -294,7 +292,6 @@ RUN --mount=type=cache,target=/root/.ccache,id=ort-ccache \
         --skip_tests \
         --allow_running_as_root \
         --compile_no_warning_as_error \
-        --use_rocm --rocm_home /opt/rocm \
         --use_migraphx --migraphx_home /opt/rocm \
         --cmake_extra_defines "CMAKE_HIP_ARCHITECTURES=${ROCM_ARCH}" \
         --cmake_extra_defines "CMAKE_C_COMPILER_LAUNCHER=ccache" \
