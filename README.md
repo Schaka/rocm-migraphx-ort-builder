@@ -71,7 +71,7 @@ RUN python3 -c "import onnxruntime as ort; print(ort.get_available_providers())"
   the breadth AMD's own published images build for. Narrow it to your one GPU
   for a much faster build (quote it if it contains a `;`, e.g.
   `--build-arg ROCM_ARCH=gfx1201`).
-- `ORT_VERSION` (default `v1.23.2`) - onnxruntime git tag.
+- `ORT_VERSION` (default `v1.27.1`) - onnxruntime git tag.
 - `PYTORCH_VERSION` (default `v2.12.0`) - pytorch git tag.
 - `BUILD_PARALLEL_LEVEL` (default `auto`) - MIGraphX/rocMLIR and PyTorch build
   parallelism (`CMAKE_BUILD_PARALLEL_LEVEL`/`MAX_JOBS`). `auto` sizes it from

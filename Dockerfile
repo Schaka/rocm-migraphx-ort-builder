@@ -163,6 +163,12 @@ RUN --mount=type=cache,target=/root/.ccache,id=migraphx-ccache \
         -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
         -T install
 
+# Stamp the built ref + resolved commit into the image so downstream
+# consumers (e.g. AudioMuse-AI's entrypoint) can detect a MIGraphX change
+# across BASE_IMAGE bumps and invalidate their compiled-model cache instead
+# of silently recompiling against a stale cache forever.
+RUN echo "${MIGRAPHX_REF} $(git -C /migraphx-src rev-parse HEAD)" > /opt/rocm/migraphx-version.txt
+
 FROM python-base AS pytorch-builder
 
 # No prebuilt wheel exists for this ROCm release yet (AMD's nightly index at
@@ -247,7 +253,7 @@ FROM ${PYTORCH_IMAGE} AS pytorch-export
 FROM python-base AS ort-builder
 
 ARG ROCM_ARCH="gfx900;gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201"
-ARG ORT_VERSION=v1.23.2
+ARG ORT_VERSION=v1.27.1
 
 COPY --from=migraphx-export /opt/rocm /opt/rocm
 
@@ -265,14 +271,10 @@ ENV PATH=/build-venv/bin:$PATH
 RUN git clone --recursive --branch ${ORT_VERSION} --depth 1 \
         https://github.com/microsoft/onnxruntime.git /onnxruntime
 
-# v1.23.2's semver.h relies on <cstdint> being pulled in transitively, which
-# newer GCC (as shipped in this base image) no longer does.
-RUN sed -i '/#include <optional>/a #include <cstdint>' \
-        /onnxruntime/onnxruntime/core/common/semver.h
-
 # build.py's build_python_wheel() passes --use_rocm to setup.py bdist_wheel
-# when --use_rocm is set, but v1.23.2's setup.py has no handler for that flag
-# (only --use_migraphx), so bdist_wheel rejects it as an unrecognized option.
+# when --use_rocm is set, but setup.py still has no handler for that flag as
+# of v1.27.1 (only --use_migraphx), so bdist_wheel rejects it as an
+# unrecognized option.
 RUN sed -i \
         's/elif parse_arg_remove_boolean(sys.argv, "--use_migraphx"):/elif parse_arg_remove_boolean(sys.argv, "--use_rocm"):\n    parse_arg_remove_boolean(sys.argv, "--use_migraphx")\n    is_migraphx = True\n    package_name = "onnxruntime-rocm"\nelif parse_arg_remove_boolean(sys.argv, "--use_migraphx"):/' \
         /onnxruntime/setup.py
