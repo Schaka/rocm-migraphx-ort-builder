@@ -40,6 +40,20 @@ Both CK (composable_kernel) and rocMLIR are built from source and enabled
 build tool (`rbuild`) rather than apt packages, which don't line up with what
 MIGraphX's CMake actually requires (see the Dockerfile's comments).
 
+## GPU support
+
+Officially supported: **gfx900 and above**, i.e. what AMD lists in the ROCm
+supported-GPU matrix. Those are the archs in `ROCM_ARCH`, the ones built
+nightly, and the only ones worth filing issues against.
+
+There is also an experimental **Polaris / gfx803** variant (RX 460 through RX
+590) built from `Dockerfile.gfx803` by a separate manual workflow. It is a
+different ROCm major on a different base image rather than another arch in the
+matrix, because ROCm 7 removed Polaris support from ROCR-Runtime outright. It
+is untested on hardware and slow by construction. Everything about it --
+rationale, versions, packages, caveats -- lives in
+**[README.gfx803.md](README.gfx803.md)**; nothing in this README applies to it.
+
 ## Using this image
 
 Drop-in `BASE_IMAGE` for anything currently pinned to a `rocm/onnxruntime:*`

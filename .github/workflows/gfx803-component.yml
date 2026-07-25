@@ -1,0 +1,174 @@
+name: Build gfx803 component
+
+# Reusable single-component build for the Polaris/gfx803 variant
+# (Dockerfile.gfx803). Structurally the same idea as build-component.yml --
+# each component gets its own runner and its own 360-minute budget, and
+# publishes an intermediate image the next component COPYs from -- but kept as
+# a separate workflow rather than parameterising the main one, because almost
+# everything differs: a different Dockerfile, a different ROCm major, a
+# different set of components (there's a rocBLAS build here that the main
+# pipeline has no equivalent of), different packages, and no arch matrix at all
+# (gfx803 is the only target this file ever builds).
+
+on:
+  workflow_call:
+    inputs:
+      component:
+        description: 'Component name -- drives the package and the Dockerfile target (rocblas|migraphx|pytorch|ort|final)'
+        required: true
+        type: string
+      target:
+        description: 'Dockerfile target stage to build; empty string builds the final image'
+        required: false
+        type: string
+        default: ''
+      final:
+        description: 'Tag as the published :latest/:<date> image instead of a :gfx803 intermediate'
+        required: false
+        type: boolean
+        default: false
+      with-rocblas-image:
+        description: 'Pass ROCBLAS_IMAGE so this build COPYs from the prebuilt rocBLAS image'
+        required: false
+        type: boolean
+        default: false
+      with-migraphx-image:
+        description: 'Pass MIGRAPHX_IMAGE so this build COPYs from the prebuilt MIGraphX image'
+        required: false
+        type: boolean
+        default: false
+      with-pytorch-image:
+        description: 'Pass PYTORCH_IMAGE so this build COPYs from the prebuilt PyTorch image'
+        required: false
+        type: boolean
+        default: false
+      with-ort-image:
+        description: 'Pass ORT_IMAGE so this build COPYs from the prebuilt ORT image'
+        required: false
+        type: boolean
+        default: false
+      pytorch-ref:
+        description: 'Override PYTORCH_REF (empty uses the Dockerfile default)'
+        required: false
+        type: string
+        default: ''
+      torchvision-ref:
+        description: 'Override TORCHVISION_REF (empty uses the Dockerfile default)'
+        required: false
+        type: string
+        default: ''
+      torchaudio-ref:
+        description: 'Override TORCHAUDIO_REF (empty uses the Dockerfile default)'
+        required: false
+        type: string
+        default: ''
+      debug:
+        description: 'Open an SSH debug session (tmate) into the runner for the duration of the build'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - if: inputs.debug
+        uses: mxschmitt/action-tmate@v3
+        with:
+          detached: true
+          limit-access-to-actor: true
+
+      # Same disk pressure as the main pipeline, and then some: the
+      # 6.4.x-complete base is a full ROCm install rather than a runtime-only
+      # one, and rocBLAS's Tensile step generates a large intermediate tree even
+      # for a single architecture (which is why the Dockerfile passes
+      # --cleanup). swap-storage: false keeps the runner's swap as a
+      # memory-pressure safety net for the compile stages.
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          docker-images: false
+          swap-storage: false
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: date
+        run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      # Every gfx803 package is named -gfx803- so it can never be confused with
+      # the supported-GPU packages the main pipeline publishes. Downstream
+      # consumers want the final one; the rest are build plumbing.
+      - id: meta
+        run: |
+          owner="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+          pkg() {
+            case "$1" in
+              rocblas)  echo "${owner}/rocm-gfx803-rocblas-builder" ;;
+              migraphx) echo "${owner}/rocm-gfx803-migraphx-builder" ;;
+              pytorch)  echo "${owner}/rocm-gfx803-torch-builder" ;;
+              ort)      echo "${owner}/rocm-gfx803-ort-builder" ;;
+              final)    echo "${owner}/rocm-gfx803-ort-torch-builder" ;;
+            esac
+          }
+          component="${{ inputs.component }}"
+          self="$(pkg "${component}")"
+
+          {
+            echo "build-args<<ARGS_EOF"
+            echo "ROCM_ARCH=gfx803"
+            if [ "${{ inputs.with-rocblas-image }}" = "true" ]; then
+              echo "ROCBLAS_IMAGE=$(pkg rocblas):gfx803"
+            fi
+            if [ "${{ inputs.with-migraphx-image }}" = "true" ]; then
+              echo "MIGRAPHX_IMAGE=$(pkg migraphx):gfx803"
+            fi
+            if [ "${{ inputs.with-pytorch-image }}" = "true" ]; then
+              echo "PYTORCH_IMAGE=$(pkg pytorch):gfx803"
+            fi
+            if [ "${{ inputs.with-ort-image }}" = "true" ]; then
+              echo "ORT_IMAGE=$(pkg ort):gfx803"
+            fi
+            # Empty means "leave the Dockerfile's pin alone" -- passing an
+            # empty build-arg would override the ARG default with "" and break
+            # the clone, so each is only emitted when actually set.
+            [ -n "${{ inputs.pytorch-ref }}" ] && echo "PYTORCH_REF=${{ inputs.pytorch-ref }}"
+            [ -n "${{ inputs.torchvision-ref }}" ] && echo "TORCHVISION_REF=${{ inputs.torchvision-ref }}"
+            [ -n "${{ inputs.torchaudio-ref }}" ] && echo "TORCHAUDIO_REF=${{ inputs.torchaudio-ref }}"
+            echo "ARGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "${{ inputs.final }}" = "true" ]; then
+            {
+              echo "tags<<TAGS_EOF"
+              echo "${self}:latest"
+              echo "${self}:${{ steps.date.outputs.date }}"
+              echo "TAGS_EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=${self}:gfx803" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "cache-ref=${self}:cache-gfx803" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.gfx803
+          push: true
+          target: ${{ inputs.target }}
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: ${{ steps.meta.outputs.build-args }}
+          cache-from: type=registry,ref=${{ steps.meta.outputs.cache-ref }}
+          cache-to: type=registry,ref=${{ steps.meta.outputs.cache-ref }},mode=max
