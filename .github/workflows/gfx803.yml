@@ -1,7 +1,7 @@
 name: Build gfx803 (Polaris)
 
 # Manual-only. There is deliberately no schedule: unlike the main nightly, every
-# version in Dockerfile.gfx803 is pinned to an immutable ref (ROCm 6.4.4,
+# version in gfx803/Dockerfile.gfx803 is pinned to an immutable ref (ROCm 6.4.4,
 # MIGraphX release/rocm-rel-6.4, a torch release branch, an ORT tag), so a
 # nightly run would rebuild byte-identical inputs and republish the same image.
 # Run it when a pin changes, or when something needs re-verifying on hardware.

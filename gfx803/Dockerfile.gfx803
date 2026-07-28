@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Polaris / gfx803 variant: MIGraphX + ONNX Runtime + PyTorch on ROCm 6.4.x.
-# User-facing docs (versions, packages, caveats): README.gfx803.md
+# User-facing docs (versions, packages, caveats): gfx803/README.md
 #
 # Separate from the main Dockerfile on purpose. gfx803 (RX 460/470/480/550/560/
 # 570/580/590) cannot be an arch in that build's matrix, because it isn't a
@@ -47,13 +47,14 @@
 # Expect this to be slow: untuned MIOpen, no packed-fp16, no dot instructions.
 # It is meant to make a 20-euro card usable, not competitive.
 #
-# Build: docker build -f Dockerfile.gfx803 -t <tag> .
+# Build: docker build -f gfx803/Dockerfile.gfx803 -t <tag> gfx803
 ARG BASE_IMAGE=rocm/dev-ubuntu-24.04:6.4.4-complete
 
 # Component-image references, same indirection as the main Dockerfile: in CI
 # each component builds as its own job/image and the next stage COPYs the
 # prebuilt result instead of recompiling. Defaults point at the local stage
-# names so a plain one-shot `docker build -f Dockerfile.gfx803 .` still works.
+# names so a plain one-shot `docker build -f gfx803/Dockerfile.gfx803 gfx803`
+# still works.
 ARG ROCBLAS_IMAGE=rocblas-builder
 ARG MIGRAPHX_IMAGE=migraphx-builder
 ARG PYTORCH_IMAGE=pytorch-builder

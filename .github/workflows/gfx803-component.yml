@@ -1,7 +1,7 @@
 name: Build gfx803 component
 
 # Reusable single-component build for the Polaris/gfx803 variant
-# (Dockerfile.gfx803). Structurally the same idea as build-component.yml --
+# (gfx803/Dockerfile.gfx803). Structurally the same idea as build-component.yml --
 # each component gets its own runner and its own 360-minute budget, and
 # publishes an intermediate image the next component COPYs from -- but kept as
 # a separate workflow rather than parameterising the main one, because almost
@@ -164,8 +164,8 @@ jobs:
 
       - uses: docker/build-push-action@v6
         with:
-          context: .
-          file: Dockerfile.gfx803
+          context: gfx803
+          file: gfx803/Dockerfile.gfx803
           push: true
           target: ${{ inputs.target }}
           tags: ${{ steps.meta.outputs.tags }}
