@@ -160,7 +160,24 @@ RUN --mount=type=cache,target=/root/.ccache,id=gfx803-rocblas-ccache \
     echo "rocBLAS build: arch ${ROCM_ARCH}, $jobs parallel jobs"; \
     python3 ./rmake.py -i -a "${ROCM_ARCH}" -j "$jobs" \
         --no_hipblaslt --cleanup \
-    && rm -rf /rocblas-src/build
+    && rm -rf /rocblas-src/build \
+    # Verify the rebuild actually landed gfx803 Tensile kernels before letting
+    # this stage be considered a success. Without this check, a broken rebuild
+    # (e.g. rmake silently falling back to the base image's prebuilt library,
+    # or installing to a path this Dockerfile doesn't expect) still exits 0 and
+    # gets pushed to the shared :gfx803 tag -- and every downstream consumer
+    # (migraphx, pytorch, the final image) then inherits a rocBLAS with no
+    # gfx803 code objects at all, failing only much later at runtime with
+    # "Illegal seek for GPU arch: gfx803" instead of here, at build time.
+    && echo "Verifying gfx803 Tensile library is present..." \
+    && if ! find /opt/rocm -iname "*TensileLibrary*gfx803*" | grep -q .; then \
+        echo "FATAL: rocBLAS rebuild did not produce a gfx803 Tensile library." >&2; \
+        echo "Expected a file matching *TensileLibrary*gfx803* under /opt/rocm -- found none." >&2; \
+        echo "Contents of /opt/rocm/lib/rocblas/library (if present):" >&2; \
+        find /opt/rocm/lib/rocblas/library -maxdepth 1 2>&1 >&2 || true; \
+        exit 1; \
+    fi \
+    && echo "OK: gfx803 Tensile library confirmed present."
 
 # Indirection alias (BuildKit rejects a variable in COPY --from, so resolve the
 # ARG through a FROM with a static name first).
