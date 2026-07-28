@@ -196,8 +196,20 @@ RUN --mount=type=cache,target=/root/.ccache,id=gfx803-rocblas-ccache \
     # a rocBLAS with no gfx803 code objects at all, failing only much later
     # at runtime with "Illegal seek for GPU arch: gfx803" instead of here, at
     # build time.
+    #
+    # /opt/rocm itself is a symlink (-> /etc/alternatives/rocm ->
+    # /opt/rocm-6.4.4 in this base image). GNU find's default -P mode never
+    # follows a symlink given as the search root -- it treats /opt/rocm as
+    # a leaf node and never recurses into it, so a plain `find /opt/rocm`
+    # here always matches zero regardless of what's actually installed
+    # (confirmed: an unfiltered `find /opt/rocm/lib/rocblas/library` --
+    # which resolves the same symlink transparently via normal path
+    # resolution, since it names the target directory explicitly instead of
+    # relying on find's own recursion -- showed the gfx803 files were
+    # present all along). `-L` makes find follow the symlink so it actually
+    # recurses.
     && echo "Verifying gfx803 Tensile library is present in /opt/rocm..." \
-    && if ! find /opt/rocm -iname "*TensileLibrary*gfx803*" | grep -q .; then \
+    && if ! find -L /opt/rocm -iname "*TensileLibrary*gfx803*" | grep -q .; then \
         echo "FATAL: /opt/rocm has no gfx803 Tensile library after the copy." >&2; \
         echo "Expected a file matching *TensileLibrary*gfx803* under /opt/rocm -- found none." >&2; \
         echo "Contents of /opt/rocm/lib/rocblas/library (if present):" >&2; \
