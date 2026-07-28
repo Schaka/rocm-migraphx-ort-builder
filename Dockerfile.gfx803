@@ -160,24 +160,39 @@ RUN --mount=type=cache,target=/root/.ccache,id=gfx803-rocblas-ccache \
     echo "rocBLAS build: arch ${ROCM_ARCH}, $jobs parallel jobs"; \
     python3 ./rmake.py -i -a "${ROCM_ARCH}" -j "$jobs" \
         --no_hipblaslt --cleanup \
+    # rmake's own -i install step does NOT land in /opt/rocm: its
+    # CMAKE_INSTALL_PREFIX is the relative "rocblas-install", which cmake
+    # resolves inside the build directory (/rocblas-src/build/release/
+    # rocblas-install), not against ROCM_DIR/ROCM_PATH/CPACK_PACKAGING_
+    # INSTALL_PREFIX -- those three only point the *build* at the existing
+    # ROCm install for headers/deps, they don't control install output.
+    # Confirmed from a real build log: rmake correctly compiles and installs
+    # TensileLibrary_lazy_gfx803.dat and friends, but into that relative path,
+    # which the very next cleanup step (rm -rf /rocblas-src/build) then
+    # deletes -- so the base image's original gfx900+ rocBLAS in /opt/rocm is
+    # left completely untouched, and the correctly-built gfx803 library is
+    # discarded before ever reaching it. Copy the real install output over
+    # before that cleanup runs.
+    && echo "Copying rocBLAS gfx803 install output into /opt/rocm..." \
+    && cp -a /rocblas-src/build/release/rocblas-install/. /opt/rocm/ \
     && rm -rf /rocblas-src/build \
-    # Verify the rebuild actually landed gfx803 Tensile kernels before letting
-    # this stage be considered a success. Without this check, a broken rebuild
-    # (e.g. rmake silently falling back to the base image's prebuilt library,
-    # or installing to a path this Dockerfile doesn't expect) still exits 0 and
-    # gets pushed to the shared :gfx803 tag -- and every downstream consumer
-    # (migraphx, pytorch, the final image) then inherits a rocBLAS with no
-    # gfx803 code objects at all, failing only much later at runtime with
-    # "Illegal seek for GPU arch: gfx803" instead of here, at build time.
-    && echo "Verifying gfx803 Tensile library is present..." \
+    # Verify the copy actually landed gfx803 Tensile kernels in /opt/rocm
+    # before letting this stage be considered a success. Without this check,
+    # a broken rebuild or a future change to rmake's install layout still
+    # exits 0 and gets pushed to the shared :gfx803 tag -- and every
+    # downstream consumer (migraphx, pytorch, the final image) then inherits
+    # a rocBLAS with no gfx803 code objects at all, failing only much later
+    # at runtime with "Illegal seek for GPU arch: gfx803" instead of here, at
+    # build time.
+    && echo "Verifying gfx803 Tensile library is present in /opt/rocm..." \
     && if ! find /opt/rocm -iname "*TensileLibrary*gfx803*" | grep -q .; then \
-        echo "FATAL: rocBLAS rebuild did not produce a gfx803 Tensile library." >&2; \
+        echo "FATAL: /opt/rocm has no gfx803 Tensile library after the copy." >&2; \
         echo "Expected a file matching *TensileLibrary*gfx803* under /opt/rocm -- found none." >&2; \
         echo "Contents of /opt/rocm/lib/rocblas/library (if present):" >&2; \
         find /opt/rocm/lib/rocblas/library -maxdepth 1 2>&1 >&2 || true; \
         exit 1; \
     fi \
-    && echo "OK: gfx803 Tensile library confirmed present."
+    && echo "OK: gfx803 Tensile library confirmed present in /opt/rocm."
 
 # Indirection alias (BuildKit rejects a variable in COPY --from, so resolve the
 # ARG through a FROM with a static name first).
