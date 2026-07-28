@@ -145,8 +145,14 @@ WORKDIR /rocblas-src
 # support at all (gfx90a+). Leaving it linked would mean a runtime path that
 # can only fail on this hardware.
 #
-# --cleanup: Tensile generates an enormous intermediate tree even for a single
+# Disk: Tensile generates an enormous intermediate tree even for a single
 # architecture, and a hosted runner has ~14GB of disk after the base image.
+# rmake.py has its own --cleanup flag for this, but it deletes the entire
+# build/release tree -- including the install output this stage needs to
+# copy out to /opt/rocm -- as its last internal action, before returning
+# control to the shell. That raced against (and silently defeated) the copy
+# step below. --cleanup is intentionally NOT passed here; the `rm -rf
+# /rocblas-src/build` after the copy reclaims the same disk without the race.
 #
 # Job count uses the same MemAvailable/4GB-per-job "auto" sizing as the main
 # Dockerfile's compile stages.
@@ -159,7 +165,7 @@ RUN --mount=type=cache,target=/root/.ccache,id=gfx803-rocblas-ccache \
     fi; \
     echo "rocBLAS build: arch ${ROCM_ARCH}, $jobs parallel jobs"; \
     python3 ./rmake.py -i -a "${ROCM_ARCH}" -j "$jobs" \
-        --no_hipblaslt --cleanup \
+        --no_hipblaslt \
     # rmake's own -i install step does NOT land in /opt/rocm: its
     # CMAKE_INSTALL_PREFIX is the relative "rocblas-install", which cmake
     # resolves inside the build directory (/rocblas-src/build/release/
@@ -167,12 +173,18 @@ RUN --mount=type=cache,target=/root/.ccache,id=gfx803-rocblas-ccache \
     # INSTALL_PREFIX -- those three only point the *build* at the existing
     # ROCm install for headers/deps, they don't control install output.
     # Confirmed from a real build log: rmake correctly compiles and installs
-    # TensileLibrary_lazy_gfx803.dat and friends, but into that relative path,
-    # which the very next cleanup step (rm -rf /rocblas-src/build) then
-    # deletes -- so the base image's original gfx900+ rocBLAS in /opt/rocm is
-    # left completely untouched, and the correctly-built gfx803 library is
-    # discarded before ever reaching it. Copy the real install output over
-    # before that cleanup runs.
+    # TensileLibrary_lazy_gfx803.dat and friends, but into that relative path.
+    #
+    # A second bug compounded this: rmake.py's own --cleanup flag (previously
+    # passed here) deletes the entire build/release tree -- rocblas-install
+    # included -- as its last internal action, before returning control to
+    # the shell. So even after adding a `cp -a rocblas-install/. /opt/rocm/`
+    # step, the copy ran against an already-emptied source and silently
+    # copied nothing (confirmed: a second build log showed the copy "succeed"
+    # with zero gfx803 files landing in /opt/rocm). --cleanup is dropped
+    # entirely below; we already do our own `rm -rf /rocblas-src/build`
+    # right after the copy, so nothing is lost by not asking rmake to do it
+    # itself first.
     && echo "Copying rocBLAS gfx803 install output into /opt/rocm..." \
     && cp -a /rocblas-src/build/release/rocblas-install/. /opt/rocm/ \
     && rm -rf /rocblas-src/build \
