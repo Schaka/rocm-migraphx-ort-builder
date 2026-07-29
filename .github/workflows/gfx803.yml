@@ -58,6 +58,11 @@ on:
         type: boolean
         required: false
         default: false
+      no-cache:
+        description: 'Force a fully fresh build, ignoring the registry build cache (use if a component is suspected stale/corrupted)'
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   rocblas:
@@ -71,6 +76,7 @@ jobs:
       component: rocblas
       target: rocblas-builder
       debug: ${{ inputs.debug }}
+      no-cache: ${{ inputs.no-cache }}
 
   # `needs` + a skipped dependency: GitHub reports result == 'skipped', not
   # 'success', so every downstream gate has to accept both -- otherwise
@@ -89,6 +95,7 @@ jobs:
       target: migraphx-builder
       with-rocblas-image: true
       debug: ${{ inputs.debug }}
+      no-cache: ${{ inputs.no-cache }}
 
   pytorch:
     needs: rocblas
@@ -106,6 +113,7 @@ jobs:
       torchvision-ref: ${{ inputs.torchvision-ref }}
       torchaudio-ref: ${{ inputs.torchaudio-ref }}
       debug: ${{ inputs.debug }}
+      no-cache: ${{ inputs.no-cache }}
 
   ort:
     needs: migraphx
@@ -120,6 +128,7 @@ jobs:
       target: ort-builder
       with-migraphx-image: true
       debug: ${{ inputs.debug }}
+      no-cache: ${{ inputs.no-cache }}
 
   final:
     needs: [migraphx, pytorch, ort]
@@ -139,3 +148,4 @@ jobs:
       with-pytorch-image: true
       with-ort-image: true
       debug: ${{ inputs.debug }}
+      no-cache: ${{ inputs.no-cache }}

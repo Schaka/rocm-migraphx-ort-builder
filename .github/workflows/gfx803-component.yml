@@ -67,6 +67,11 @@ on:
         required: false
         type: boolean
         default: false
+      no-cache:
+        description: 'Ignore cache-from and force a fully fresh build (bypasses a possibly-stale registry cache)'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -162,6 +167,9 @@ jobs:
 
           echo "cache-ref=${self}:cache-gfx803" >> "$GITHUB_OUTPUT"
 
+      # no-cache bypasses cache-from entirely rather than just skipping cache-to,
+      # so a bad/stale layer already sitting under cache-ref can't be reused --
+      # this run still repopulates cache-ref (mode=max) with a fresh result.
       - uses: docker/build-push-action@v6
         with:
           context: gfx803
@@ -170,5 +178,6 @@ jobs:
           target: ${{ inputs.target }}
           tags: ${{ steps.meta.outputs.tags }}
           build-args: ${{ steps.meta.outputs.build-args }}
-          cache-from: type=registry,ref=${{ steps.meta.outputs.cache-ref }}
+          no-cache: ${{ inputs.no-cache }}
+          cache-from: ${{ inputs.no-cache && '' || format('type=registry,ref={0}', steps.meta.outputs.cache-ref) }}
           cache-to: type=registry,ref=${{ steps.meta.outputs.cache-ref }},mode=max
