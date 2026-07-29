@@ -123,8 +123,20 @@ RUN --mount=type=cache,target=/root/.ccache,id=rocblas-legacy-ccache \
     esac; \
     apt-get update && apt-get install -y --no-install-recommends \
         git cmake ninja-build build-essential pkg-config gfortran ccache \
-        libmsgpack-dev wget python3-pip python3-venv \
+        libmsgpack-cxx-dev wget python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/*; \
+    # Tensile's find_package(msgpackc-cxx CONFIG) wants
+    # msgpackc-cxx(-config|Config).cmake -- Debian's package installs the
+    # same content one letter off, as msgpack-cxx-config.cmake (project
+    # name "msgpack-cxx", not "msgpackc-cxx"; libmsgpack-dev itself is just
+    # a transitional dummy pulling in the plain-C libmsgpack-c-dev, which
+    # has no CMake config at all). Symlink under a name CMake's default
+    # PREFIX/lib/cmake/<pkg> search convention actually matches, rather
+    # than patching Tensile's CMakeLists for a packaging-naming quirk.
+    mkdir -p /usr/local/lib/cmake/msgpackc-cxx; \
+    for f in /usr/lib/x86_64-linux-gnu/cmake/msgpack-cxx/msgpack-cxx-*.cmake; do \
+        ln -s "$f" "/usr/local/lib/cmake/msgpackc-cxx/$(basename "$f" | sed 's/^msgpack-cxx/msgpackc-cxx/')"; \
+    done; \
     pip3 install --break-system-packages --no-cache-dir pyyaml joblib; \
     monorepo_ref="therock-$(echo "${ROCM_VERSION}" | cut -d. -f1,2)"; \
     echo "rocBLAS source: ROCm/rocm-libraries @ ${monorepo_ref} (projects/rocblas)"; \
