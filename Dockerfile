@@ -161,7 +161,25 @@ RUN --mount=type=cache,target=/root/.ccache,id=rocblas-legacy-ccache \
     # see the comments there for the full story (relative CMAKE_INSTALL_PREFIX,
     # and why --cleanup is never passed).
     echo "Copying rocBLAS ${ROCM_ARCH} install output into /opt/rocm..."; \
-    cp -a /rocm-libraries-src/projects/rocblas/build/release/rocblas-install/. /opt/rocm/; \
+    # This base image lays /opt/rocm out as versioned component dirs
+    # (core, core-7, core-7.14) with include/lib/share at the top level as
+    # convenience symlinks into core-7.14/ -- unlike gfx803's older, flatter
+    # base image, where a plain `cp -a src/. /opt/rocm/` (the same command
+    # used here originally) is enough. Here it fails outright: cp won't
+    # overwrite an existing symlink-named entry with a real directory
+    # ("cannot overwrite non-directory ... with directory"). Resolve each
+    # of include/lib/share to what it actually points at first, so content
+    # lands in core-7.14/ and the top-level symlinks keep working, instead
+    # of cp clobbering them.
+    src="/rocm-libraries-src/projects/rocblas/build/release/rocblas-install"; \
+    for d in include lib share; do \
+        [ -e "$src/$d" ] || continue; \
+        real_dest="$(readlink -f "/opt/rocm/$d" 2>/dev/null || echo "/opt/rocm/$d")"; \
+        mkdir -p "$real_dest"; \
+        cp -a "$src/$d/." "$real_dest/"; \
+    done; \
+    find "$src" -mindepth 1 -maxdepth 1 ! -name include ! -name lib ! -name share \
+        -exec cp -a {} /opt/rocm/ \; ; \
     rm -rf /rocm-libraries-src; \
     echo "Verifying ${ROCM_ARCH} Tensile library is present in /opt/rocm..."; \
     if ! find -L /opt/rocm -iname "*TensileLibrary*${ROCM_ARCH}*" | grep -q .; then \
