@@ -123,7 +123,7 @@ RUN --mount=type=cache,target=/root/.ccache,id=rocblas-legacy-ccache \
     esac; \
     apt-get update && apt-get install -y --no-install-recommends \
         git cmake ninja-build build-essential pkg-config gfortran ccache \
-        libmsgpack-dev wget python3-pip \
+        libmsgpack-dev wget python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/*; \
     pip3 install --break-system-packages --no-cache-dir pyyaml joblib; \
     monorepo_ref="therock-$(echo "${ROCM_VERSION}" | cut -d. -f1,2)"; \
