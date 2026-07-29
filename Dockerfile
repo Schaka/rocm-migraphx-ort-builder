@@ -40,6 +40,30 @@ ARG ORT_IMAGE=ort-builder
 # develop-tracking one.
 ARG MIGRAPHX_REF=develop
 
+# rocBLAS release tag to rebuild from for gfx900/gfx906 (see rocblas-builder
+# below) -- must match BASE_IMAGE's ROCm release, since rocBLAS built against
+# a different release than the hipBLAS/rocSOLVER/etc it links against is not
+# a supported combination. AMD's prebuilt rocBLAS package for this ROCm line
+# ships no gfx900/gfx906 code objects at all (confirmed: no
+# amdrocm-blas*-gfx900/-gfx906 apt package exists, and the base image's
+# Tensile library on disk has no gfx900/gfx906 folder) -- but the *source*
+# still carries both (rocBLAS's own TARGET_LIST_ROCM_7.1 in CMakeLists.txt
+# still lists gfx900;gfx906:xnack-, and its Tensile Logic tree still has
+# vega10/vega20 folders), so rebuilding covers them without a ROCm-major
+# downgrade, unlike gfx803 (which needs one for CDNA... err Polaris's actual
+# ROCR enumeration break on ROCm 7).
+ARG ROCM_VERSION=7.14.0
+
+# Runtime preference passed straight through to the final image's ENV.
+# Meaningless everywhere except gfx900/gfx906: PyTorch links hipBLASLt
+# unconditionally regardless of arch (cmake/Dependencies.cmake), but
+# hipBLASLt's own Tensile Logic tree has never had gfx900/gfx906 kernels
+# (oldest arch present is arcturus/gfx908) -- 0 forces GEMMs onto the
+# rocBLAS rebuilt below instead of a library with nothing to dispatch to.
+# 1 (the default) matches upstream's own default preference and is a
+# no-op on every other arch, which does have hipBLASLt kernels.
+ARG TORCH_BLAS_PREFER_HIPBLASLT=1
+
 # Cache-bust token for the develop-tracking MIGraphX clone below. A moving
 # branch's `git clone` layer has a cache key that never changes, so it would
 # cache-hit forever and keep rebuilding the same stale commit every night --
@@ -61,7 +85,61 @@ FROM ${BASE_IMAGE} AS python-base
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
     && uv python install 3.12
 
-FROM python-base AS migraphx-builder
+# Rebuilds rocBLAS for gfx900/gfx906 only; every other arch passes through
+# unchanged (this stage is a no-op for them -- /opt/rocm keeps the base
+# image's own prebuilt rocBLAS, which does have their kernels). Both
+# migraphx-builder and pytorch-builder build on top of this stage instead of
+# python-base directly, so both see the rebuilt rocBLAS when it applies.
+#
+# Only fires for a single-arch build (ROCM_ARCH exactly "gfx900" or
+# "gfx906"), which is what CI always passes (see build-component.yml). A
+# local one-shot `docker build .` using the default multi-arch ROCM_ARCH
+# list won't match the case below and won't rebuild -- that default is a
+# convenience fallback for arches that don't need this fix, not how
+# gfx900/gfx906 are actually meant to be built.
+FROM python-base AS rocblas-builder
+
+ARG ROCM_ARCH
+ARG ROCM_VERSION
+ARG BUILD_PARALLEL_LEVEL=auto
+
+RUN --mount=type=cache,target=/root/.ccache,id=rocblas-legacy-ccache \
+    set -eux; \
+    case "${ROCM_ARCH}" in \
+      gfx900|gfx906) ;; \
+      *) echo "rocblas-builder: ${ROCM_ARCH} uses the base image's prebuilt rocBLAS, no rebuild needed"; exit 0 ;; \
+    esac; \
+    apt-get update && apt-get install -y --no-install-recommends \
+        git cmake ninja-build build-essential pkg-config gfortran ccache \
+        libmsgpack-dev wget python3-pip \
+    && rm -rf /var/lib/apt/lists/*; \
+    pip3 install --break-system-packages --no-cache-dir pyyaml joblib; \
+    git clone --branch "rocm-${ROCM_VERSION}" --depth 1 \
+        https://github.com/ROCm/rocBLAS.git /rocblas-src; \
+    cd /rocblas-src; \
+    jobs="${BUILD_PARALLEL_LEVEL}"; \
+    if [ "$jobs" = "auto" ]; then \
+        jobs=$(awk '/MemAvailable/{printf "%d", $2/1024/1024/4}' /proc/meminfo); \
+        cpu=$(nproc); [ "$jobs" -gt "$cpu" ] && jobs=$cpu; \
+        [ "$jobs" -lt 1 ] && jobs=1; \
+    fi; \
+    echo "rocBLAS build: arch ${ROCM_ARCH}, $jobs parallel jobs"; \
+    python3 ./rmake.py -i -a "${ROCM_ARCH}" -j "$jobs" --no_hipblaslt; \
+    # rmake's -i install target lands under build/release/rocblas-install,
+    # not /opt/rocm -- same install-path quirk as gfx803/Dockerfile.gfx803,
+    # see the comments there for the full story (relative CMAKE_INSTALL_PREFIX,
+    # and why --cleanup is never passed).
+    echo "Copying rocBLAS ${ROCM_ARCH} install output into /opt/rocm..."; \
+    cp -a /rocblas-src/build/release/rocblas-install/. /opt/rocm/; \
+    rm -rf /rocblas-src/build; \
+    echo "Verifying ${ROCM_ARCH} Tensile library is present in /opt/rocm..."; \
+    if ! find -L /opt/rocm -iname "*TensileLibrary*${ROCM_ARCH}*" | grep -q .; then \
+        echo "FATAL: /opt/rocm has no ${ROCM_ARCH} Tensile library after the copy." >&2; \
+        exit 1; \
+    fi; \
+    echo "OK: ${ROCM_ARCH} Tensile library confirmed present in /opt/rocm."
+
+FROM rocblas-builder AS migraphx-builder
 
 # Semicolon-separated GPU_TARGETS list, matching the breadth AMD's own
 # published images build for (CDNA1-3, RDNA2-4), not just this host's GPU.
@@ -122,6 +200,23 @@ RUN echo "MIGraphX ${MIGRAPHX_REF} snapshot: ${SOURCE_DATE}" \
         https://github.com/ROCm/AMDMIGraphX.git /migraphx-src
 
 WORKDIR /migraphx-src
+
+# composable_kernel explicitly denylists gfx900/gfx906 (its CMakeLists.txt:
+# CK_UNSUPPORTED_GPU_TARGETS="gfx900;gfx906;gfx90c" -- a single-target
+# request against that list generates a dummy target and returns, per CK's
+# own CMakeLists, rather than building anything real). Turning it off via
+# -DMIGRAPHX_USE_COMPOSABLEKERNEL=Off alone is not sufficient: rbuild builds
+# everything requirements.txt lists regardless of MIGraphX's own cmake
+# options (same gotcha gfx803/Dockerfile.gfx803 documents for its own
+# rocMLIR/CK exclusion), so it would still try to build CK's dummy target
+# for these two arches. Strip the line so rbuild never attempts it.
+RUN case "${ROCM_ARCH}" in \
+        gfx900|gfx906) \
+            sed -i '/composable_kernel/d' requirements.txt \
+            && ! grep -q 'composable_kernel' requirements.txt \
+            ;; \
+    esac
+
 # rbuild shells out to a bare `cget` (relies on PATH, not sys.executable), so
 # the venv's bin dir must be on PATH, not just invoked via absolute path.
 #
@@ -150,6 +245,18 @@ RUN --mount=type=cache,target=/root/.ccache,id=migraphx-ccache \
         [ "$jobs" -lt 1 ] && jobs=1; \
     fi; \
     echo "rocMLIR/LLVM build: using $jobs parallel jobs"; \
+    # hipBLASLt's Tensile Logic tree has never had gfx900/gfx906 kernels
+    # (oldest arch present is arcturus/gfx908, same fact that motivates
+    # rocblas-builder above) -- link against the rocBLAS rebuilt there
+    # instead of a hipBLASLt with nothing to dispatch to on this hardware.
+    # composable_kernel is denylisted for both by CK's own CMakeLists (see
+    # the requirements.txt strip above) -- MIGRAPHX_USE_COMPOSABLEKERNEL=Off
+    # keeps MIGraphX's own cmake from expecting the CK package that was
+    # never built.
+    extra_cmake_args=""; \
+    case "${ROCM_ARCH}" in \
+        gfx900|gfx906) extra_cmake_args="-DMIGRAPHX_USE_HIPBLASLT=Off -DMIGRAPHX_USE_COMPOSABLEKERNEL=Off" ;; \
+    esac; \
     CMAKE_BUILD_PARALLEL_LEVEL=$jobs \
     PATH=/rbuild-venv/bin:$PATH /rbuild-venv/bin/rbuild build -d /migraphx-deps -B build -G Ninja \
         --cxx=/opt/rocm/llvm/bin/clang++ --cc=/opt/rocm/llvm/bin/clang \
@@ -161,6 +268,7 @@ RUN --mount=type=cache,target=/root/.ccache,id=migraphx-ccache \
         -DBUILD_TESTING=Off \
         -DCMAKE_C_COMPILER_LAUNCHER=ccache \
         -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+        ${extra_cmake_args} \
         -T install
 
 # Stamp the built ref + resolved commit into the image so downstream
@@ -169,12 +277,13 @@ RUN --mount=type=cache,target=/root/.ccache,id=migraphx-ccache \
 # of silently recompiling against a stale cache forever.
 RUN echo "${MIGRAPHX_REF} $(git -C /migraphx-src rev-parse HEAD)" > /opt/rocm/migraphx-version.txt
 
-FROM python-base AS pytorch-builder
+FROM rocblas-builder AS pytorch-builder
 
 # No prebuilt wheel exists for this ROCm release yet (AMD's nightly index at
 # download.pytorch.org/whl/nightly/ only goes up to rocm7.2, this base is
 # 7.14) -- build from source. Doesn't need MIGraphX, only the HIP/rocBLAS/
-# MIOpen/rocRAND stack already in this base image.
+# MIOpen/rocRAND stack already in this base image (or the gfx900/gfx906
+# rebuild from rocblas-builder above, on those two arches).
 ARG ROCM_ARCH="gfx900;gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201"
 ARG PYTORCH_VERSION=v2.12.0
 ARG BUILD_PARALLEL_LEVEL=auto
@@ -303,6 +412,11 @@ RUN --mount=type=cache,target=/root/.ccache,id=ort-ccache \
 FROM ${ORT_IMAGE} AS ort-export
 
 FROM python-base
+
+ARG TORCH_BLAS_PREFER_HIPBLASLT
+# See the ARG's own comment near the top of this file. 0 only on gfx900/
+# gfx906; a no-op 1 everywhere else.
+ENV TORCH_BLAS_PREFER_HIPBLASLT=${TORCH_BLAS_PREFER_HIPBLASLT}
 
 COPY --from=migraphx-export /opt/rocm /opt/rocm
 

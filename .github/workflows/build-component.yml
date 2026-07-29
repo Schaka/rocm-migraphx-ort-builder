@@ -152,6 +152,12 @@ jobs:
             if [ "${{ inputs.with-ort-image }}" = "true" ]; then
               echo "ORT_IMAGE=$(pkg ort):${arch}${suffix}"
             fi
+            # Only the final stage's ENV actually reads this (see Dockerfile) --
+            # harmless to pass on every component, since gfx900/gfx906 is the
+            # only case where it's not the Dockerfile's own default of 1.
+            case "${arch}" in
+              gfx900|gfx906) echo "TORCH_BLAS_PREFER_HIPBLASLT=0" ;;
+            esac
             echo "ARGS_EOF"
           } >> "$GITHUB_OUTPUT"
 
