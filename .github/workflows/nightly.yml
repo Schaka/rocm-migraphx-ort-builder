@@ -10,7 +10,7 @@ on:
         required: false
         default: ''
       migraphx-ref:
-        description: 'Git ref to build MIGraphX from (branch/tag), e.g. release/rocm-rel-7.13. Leave as develop for the normal nightly build.'
+        description: 'Git ref to build MIGraphX from (branch/tag), e.g. release/rocm-rel-7.14. Leave as develop for the normal nightly build.'
         required: false
         default: 'develop'
       debug:
