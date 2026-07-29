@@ -103,6 +103,18 @@ ARG ROCM_ARCH
 ARG ROCM_VERSION
 ARG BUILD_PARALLEL_LEVEL=auto
 
+# rocBLAS's standalone repo (ROCm/rocBLAS) stopped at v14.3.0 and is
+# deprecated -- current development moved into the ROCm/rocm-libraries
+# monorepo, tagged "therock-<major>.<minor>" (no patch component, unlike
+# this file's own ROCM_VERSION/BASE_IMAGE tags). Confirmed at the
+# therock-7.14 tag specifically (not just develop): projects/rocblas/
+# CMakeLists.txt's TARGET_LIST_ROCM_7.13 still lists gfx900;gfx906:xnack-,
+# and projects/rocblas/library/src/blas3/Tensile/Logic/asm_full/ still has
+# vega10 (gfx900) and vega20 (gfx906) folders. Tensile is no longer a git
+# submodule of rocblas -- CMakeLists.txt resolves it from
+# ${CMAKE_CURRENT_SOURCE_DIR}/../../shared/tensile, i.e. the monorepo's
+# shared/tensile at the same tag, which is why the sparse-checkout below
+# pulls that alongside projects/rocblas rather than rocblas alone.
 RUN --mount=type=cache,target=/root/.ccache,id=rocblas-legacy-ccache \
     set -eux; \
     case "${ROCM_ARCH}" in \
@@ -114,9 +126,16 @@ RUN --mount=type=cache,target=/root/.ccache,id=rocblas-legacy-ccache \
         libmsgpack-dev wget python3-pip \
     && rm -rf /var/lib/apt/lists/*; \
     pip3 install --break-system-packages --no-cache-dir pyyaml joblib; \
-    git clone --branch "rocm-${ROCM_VERSION}" --depth 1 \
-        https://github.com/ROCm/rocBLAS.git /rocblas-src; \
-    cd /rocblas-src; \
+    monorepo_ref="therock-$(echo "${ROCM_VERSION}" | cut -d. -f1,2)"; \
+    echo "rocBLAS source: ROCm/rocm-libraries @ ${monorepo_ref} (projects/rocblas)"; \
+    git clone --filter=blob:none --depth 1 --no-checkout \
+        --branch "${monorepo_ref}" \
+        https://github.com/ROCm/rocm-libraries.git /rocm-libraries-src; \
+    cd /rocm-libraries-src; \
+    git sparse-checkout init --cone; \
+    git sparse-checkout set cmake shared/tensile projects/rocblas; \
+    git checkout "${monorepo_ref}"; \
+    cd /rocm-libraries-src/projects/rocblas; \
     jobs="${BUILD_PARALLEL_LEVEL}"; \
     if [ "$jobs" = "auto" ]; then \
         jobs=$(awk '/MemAvailable/{printf "%d", $2/1024/1024/4}' /proc/meminfo); \
@@ -130,8 +149,8 @@ RUN --mount=type=cache,target=/root/.ccache,id=rocblas-legacy-ccache \
     # see the comments there for the full story (relative CMAKE_INSTALL_PREFIX,
     # and why --cleanup is never passed).
     echo "Copying rocBLAS ${ROCM_ARCH} install output into /opt/rocm..."; \
-    cp -a /rocblas-src/build/release/rocblas-install/. /opt/rocm/; \
-    rm -rf /rocblas-src/build; \
+    cp -a /rocm-libraries-src/projects/rocblas/build/release/rocblas-install/. /opt/rocm/; \
+    rm -rf /rocm-libraries-src; \
     echo "Verifying ${ROCM_ARCH} Tensile library is present in /opt/rocm..."; \
     if ! find -L /opt/rocm -iname "*TensileLibrary*${ROCM_ARCH}*" | grep -q .; then \
         echo "FATAL: /opt/rocm has no ${ROCM_ARCH} Tensile library after the copy." >&2; \
