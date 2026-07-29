@@ -303,6 +303,28 @@ RUN if echo "|${LEGACY_GCN_ARCHES}|" | grep -q "|${ROCM_ARCH}|"; then \
         && ! grep -q 'composable_kernel' requirements.txt; \
     fi
 
+# Upstream bug (filed: see gfx900-906-gfx-default-rocblas-bug-report.md),
+# reproduced independently of any of our own build flags/caching:
+# device_name.hpp guards gfx_default_rocblas()'s DECLARATION behind
+# `#if MIGRAPHX_USE_HIPBLASLT`, but lowering.cpp's one call site has no
+# matching guard, so -DMIGRAPHX_USE_HIPBLASLT=Off (required on gfx900/gfx906
+# -- hipBLASLt has no kernels for either) fails to compile outright:
+# "no member named 'gfx_default_rocblas' in namespace 'migraphx::gpu'".
+# hipblaslt_supported() itself already returns a hardcoded false with the
+# flag off, which alone makes the enclosing `or` chain unconditionally true
+# at runtime regardless of gfx_default_rocblas() -- so replacing the call
+# with a literal `true` under the same guard is a semantics-preserving fix,
+# not a behavior change. Confirmed this is the only unguarded call site in
+# actually-compiled code (the other two references are in test/, excluded by
+# -DBUILD_TESTING=Off below).
+RUN if echo "|${LEGACY_GCN_ARCHES}|" | grep -q "|${ROCM_ARCH}|"; then \
+        sed -i \
+            's/not hipblaslt_supported() or gpu::gfx_default_rocblas()/not hipblaslt_supported()/' \
+            src/targets/gpu/lowering.cpp \
+        && grep -q 'not hipblaslt_supported()' src/targets/gpu/lowering.cpp \
+        && ! grep -q 'gfx_default_rocblas' src/targets/gpu/lowering.cpp; \
+    fi
+
 # rbuild shells out to a bare `cget` (relies on PATH, not sys.executable), so
 # the venv's bin dir must be on PATH, not just invoked via absolute path.
 #
