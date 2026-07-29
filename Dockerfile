@@ -54,6 +54,17 @@ ARG MIGRAPHX_REF=develop
 # ROCR enumeration break on ROCm 7).
 ARG ROCM_VERSION=7.14.0
 
+# Single source of truth for which arches need the rocBLAS-from-source /
+# composable_kernel-off / hipBLASLt-off special-casing scattered through
+# rocblas-builder and migraphx-builder below (AMD's prebuilt packages for
+# this ROCm line ship no gfx900/gfx906 code objects at all, in rocBLAS,
+# hipBLASLt, or composable_kernel). A shell `case ... in ${LEGACY_GCN_ARCHES})`
+# pattern, not a real list -- Docker build stages don't share shell state
+# across RUN layers, so this can't eliminate the repeated `case` scaffolding
+# itself, only keep the actual arch set in one place. Add a third arch here,
+# not in three separate case statements, if one ever needs the same treatment.
+ARG LEGACY_GCN_ARCHES="gfx900|gfx906"
+
 # Runtime preference passed straight through to the final image's ENV.
 # Meaningless everywhere except gfx900/gfx906: PyTorch links hipBLASLt
 # unconditionally regardless of arch (cmake/Dependencies.cmake), but
@@ -102,6 +113,7 @@ FROM python-base AS rocblas-builder
 ARG ROCM_ARCH
 ARG ROCM_VERSION
 ARG BUILD_PARALLEL_LEVEL=auto
+ARG LEGACY_GCN_ARCHES
 
 # rocBLAS's standalone repo (ROCm/rocBLAS) stopped at v14.3.0 and is
 # deprecated -- current development moved into the ROCm/rocm-libraries
@@ -117,10 +129,16 @@ ARG BUILD_PARALLEL_LEVEL=auto
 # pulls that alongside projects/rocblas rather than rocblas alone.
 RUN --mount=type=cache,target=/root/.ccache,id=rocblas-legacy-ccache \
     set -eux; \
-    case "${ROCM_ARCH}" in \
-      gfx900|gfx906) ;; \
-      *) echo "rocblas-builder: ${ROCM_ARCH} uses the base image's prebuilt rocBLAS, no rebuild needed"; exit 0 ;; \
-    esac; \
+    # Matches LEGACY_GCN_ARCHES (a "|"-joined list, see its ARG comment near
+    # the top of this file) against ROCM_ARCH -- not a `case` pattern, since
+    # a variable's expanded value can't supply case's own `|` alternation
+    # syntax (that's parsed as literal grammar, not built from a runtime
+    # string). Padding both sides with "|" avoids "gfx90" false-matching
+    # "gfx900".
+    if ! echo "|${LEGACY_GCN_ARCHES}|" | grep -q "|${ROCM_ARCH}|"; then \
+        echo "rocblas-builder: ${ROCM_ARCH} uses the base image's prebuilt rocBLAS, no rebuild needed"; \
+        exit 0; \
+    fi; \
     apt-get update && apt-get install -y --no-install-recommends \
         git cmake ninja-build build-essential pkg-config gfortran ccache \
         libmsgpack-cxx-dev wget python3-pip python3-venv \
@@ -180,13 +198,33 @@ RUN --mount=type=cache,target=/root/.ccache,id=rocblas-legacy-ccache \
     done; \
     find "$src" -mindepth 1 -maxdepth 1 ! -name include ! -name lib ! -name share \
         -exec cp -a {} /opt/rocm/ \; ; \
+    # Captured before the rm -rf below deletes $src, so there's still
+    # something to compare librocblas.so's resolved target against afterward.
+    built_real="$(find "$src/lib" -maxdepth 1 -name 'librocblas.so.*' ! -type l | head -1)"; \
+    built_size="$(stat -c%s "$built_real" 2>/dev/null || echo 0)"; \
     rm -rf /rocm-libraries-src; \
     echo "Verifying ${ROCM_ARCH} Tensile library is present in /opt/rocm..."; \
     if ! find -L /opt/rocm -iname "*TensileLibrary*${ROCM_ARCH}*" | grep -q .; then \
         echo "FATAL: /opt/rocm has no ${ROCM_ARCH} Tensile library after the copy." >&2; \
         exit 1; \
     fi; \
-    echo "OK: ${ROCM_ARCH} Tensile library confirmed present in /opt/rocm."
+    echo "OK: ${ROCM_ARCH} Tensile library confirmed present in /opt/rocm."; \
+    echo "Verifying librocblas.so resolves to the ${ROCM_ARCH} build, not the stock one..."; \
+    resolved="$(readlink -f /opt/rocm/lib/librocblas.so)"; \
+    if [ "$built_size" = "0" ] || [ "$(stat -c%s "$resolved")" != "$built_size" ]; then \
+        echo "FATAL: /opt/rocm/lib/librocblas.so resolves to ${resolved}, which is not our freshly-built rocBLAS (size mismatch)." >&2; \
+        echo "The stock base-image rocBLAS is still what actually gets loaded at runtime." >&2; \
+        exit 1; \
+    fi; \
+    echo "Verifying librocblas.so embeds real ${ROCM_ARCH} device code..."; \
+    objcopy -O binary --only-section=.hip_fatbin "$resolved" /tmp/rocblas_fatbin_check.bin; \
+    fatbin_size="$(stat -c%s /tmp/rocblas_fatbin_check.bin)"; \
+    rm -f /tmp/rocblas_fatbin_check.bin; \
+    if [ "$fatbin_size" -lt 1000000 ]; then \
+        echo "FATAL: librocblas.so's .hip_fatbin is only ${fatbin_size} bytes -- too small to contain real ${ROCM_ARCH} device code (expect several MB)." >&2; \
+        exit 1; \
+    fi; \
+    echo "OK: librocblas.so resolves to a ${ROCM_ARCH} build with a ${fatbin_size}-byte .hip_fatbin."
 
 FROM rocblas-builder AS migraphx-builder
 
@@ -195,6 +233,7 @@ FROM rocblas-builder AS migraphx-builder
 # Narrow it via --build-arg if you only need one target and want a faster
 # build.
 ARG ROCM_ARCH="gfx900;gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201"
+ARG LEGACY_GCN_ARCHES
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git cmake ninja-build build-essential pkg-config ccache \
@@ -259,12 +298,10 @@ WORKDIR /migraphx-src
 # options (same gotcha gfx803/Dockerfile.gfx803 documents for its own
 # rocMLIR/CK exclusion), so it would still try to build CK's dummy target
 # for these two arches. Strip the line so rbuild never attempts it.
-RUN case "${ROCM_ARCH}" in \
-        gfx900|gfx906) \
-            sed -i '/composable_kernel/d' requirements.txt \
-            && ! grep -q 'composable_kernel' requirements.txt \
-            ;; \
-    esac
+RUN if echo "|${LEGACY_GCN_ARCHES}|" | grep -q "|${ROCM_ARCH}|"; then \
+        sed -i '/composable_kernel/d' requirements.txt \
+        && ! grep -q 'composable_kernel' requirements.txt; \
+    fi
 
 # rbuild shells out to a bare `cget` (relies on PATH, not sys.executable), so
 # the venv's bin dir must be on PATH, not just invoked via absolute path.
@@ -303,9 +340,9 @@ RUN --mount=type=cache,target=/root/.ccache,id=migraphx-ccache \
     # keeps MIGraphX's own cmake from expecting the CK package that was
     # never built.
     extra_cmake_args=""; \
-    case "${ROCM_ARCH}" in \
-        gfx900|gfx906) extra_cmake_args="-DMIGRAPHX_USE_HIPBLASLT=Off -DMIGRAPHX_USE_COMPOSABLEKERNEL=Off" ;; \
-    esac; \
+    if echo "|${LEGACY_GCN_ARCHES}|" | grep -q "|${ROCM_ARCH}|"; then \
+        extra_cmake_args="-DMIGRAPHX_USE_HIPBLASLT=Off -DMIGRAPHX_USE_COMPOSABLEKERNEL=Off"; \
+    fi; \
     CMAKE_BUILD_PARALLEL_LEVEL=$jobs \
     PATH=/rbuild-venv/bin:$PATH /rbuild-venv/bin/rbuild build -d /migraphx-deps -B build -G Ninja \
         --cxx=/opt/rocm/llvm/bin/clang++ --cc=/opt/rocm/llvm/bin/clang \
