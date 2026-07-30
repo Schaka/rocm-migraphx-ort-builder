@@ -7,8 +7,9 @@ name: Build gfx803 component
 # a separate workflow rather than parameterising the main one, because almost
 # everything differs: a different Dockerfile, a different ROCm major, a
 # different set of components (there's a rocBLAS build here that the main
-# pipeline has no equivalent of), different packages, and no arch matrix at all
-# (gfx803 is the only target this file ever builds).
+# pipeline has an equivalent of on two arches only), and no arch matrix at all
+# (gfx803 is the only target this file ever builds). The published packages are
+# shared with the main pipeline, though -- gfx803 is just another arch tag.
 
 on:
   workflow_call:
@@ -23,7 +24,7 @@ on:
         type: string
         default: ''
       final:
-        description: 'Tag as the published :latest/:<date> image instead of a :gfx803 intermediate'
+        description: 'Tag as the published :latest-gfx803/:<date>-gfx803 image instead of a :gfx803 intermediate'
         required: false
         type: boolean
         default: false
@@ -112,19 +113,21 @@ jobs:
       - id: date
         run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
-      # Every gfx803 package is named -gfx803- so it can never be confused with
-      # the supported-GPU packages the main pipeline publishes. Downstream
-      # consumers want the final one; the rest are build plumbing.
+      # Same packages the main pipeline publishes to, with gfx803 as just
+      # another arch tag. Unlike every other tag in them, these are built from
+      # Dockerfile.gfx803 on a ROCm 6.4.4 base -- the tag doesn't say so; see
+      # gfx803/README.md. Downstream consumers want the final one; the rest are
+      # build plumbing.
       - id: meta
         run: |
           owner="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
           pkg() {
             case "$1" in
-              rocblas)  echo "${owner}/rocm-gfx803-rocblas-builder" ;;
-              migraphx) echo "${owner}/rocm-gfx803-migraphx-builder" ;;
-              pytorch)  echo "${owner}/rocm-gfx803-torch-builder" ;;
-              ort)      echo "${owner}/rocm-gfx803-ort-builder" ;;
-              final)    echo "${owner}/rocm-gfx803-ort-torch-builder" ;;
+              rocblas)  echo "${owner}/rocm-rocblas-builder" ;;
+              migraphx) echo "${owner}/rocm-migraphx-builder" ;;
+              pytorch)  echo "${owner}/rocm-migraphx-torch-builder" ;;
+              ort)      echo "${owner}/rocm-migraphx-ort-builder" ;;
+              final)    echo "${owner}/rocm-migraphx-ort-torch-builder" ;;
             esac
           }
           component="${{ inputs.component }}"
@@ -157,8 +160,8 @@ jobs:
           if [ "${{ inputs.final }}" = "true" ]; then
             {
               echo "tags<<TAGS_EOF"
-              echo "${self}:latest"
-              echo "${self}:${{ steps.date.outputs.date }}"
+              echo "${self}:latest-gfx803"
+              echo "${self}:${{ steps.date.outputs.date }}-gfx803"
               echo "TAGS_EOF"
             } >> "$GITHUB_OUTPUT"
           else

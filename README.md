@@ -20,14 +20,22 @@ instead of recompiling. MIGraphX and PyTorch are independent and run in
 parallel; ONNX Runtime builds against MIGraphX's `/opt/rocm`; a final job
 assembles all three. Each component lands in its own package:
 
+- `rocm-rocblas-builder:<arch>` -- ROCm with rocBLAS rebuilt from source. Only
+  exists for the arches that need it (`gfx900`, `gfx906`, `gfx803`); MIGraphX and
+  PyTorch both start from it there instead of each rebuilding rocBLAS themselves
 - `rocm-migraphx-builder:<arch>` -- from-source MIGraphX + ROCm deps in `/opt/rocm`
 - `rocm-migraphx-torch-builder:<arch>` -- PyTorch wheel
 - `rocm-migraphx-ort-builder:<arch>` -- ONNX Runtime wheel (built against MIGraphX)
 - `rocm-migraphx-ort-torch-builder:latest-<arch>` / `:<YYYYMMDD>-<arch>` -- the
   combined image, all three installed
 
-The first three are build plumbing (each an incomplete slice of the stack);
+All but the last are build plumbing (each an incomplete slice of the stack);
 downstream consumers want the combined `rocm-migraphx-ort-torch-builder`.
+
+The `gfx803` tags in these packages are the odd ones out: Polaris can't be
+enumerated by ROCm 7 at all, so they come from `gfx803/Dockerfile.gfx803` on a
+ROCm 6.4.4 base, built by a separate manual workflow. Same tag scheme, different
+stack -- see [gfx803/README.md](gfx803/README.md).
 
 Torch is also built from source rather than reusing AMD's `rocm/pytorch`
 image: current `rocm/pytorch` tags ship TheRock's pip-packaged ROCm SDK (no

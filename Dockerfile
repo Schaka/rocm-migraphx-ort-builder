@@ -26,8 +26,10 @@ ARG BASE_IMAGE=rocm/dev-ubuntu-26.04:7.14.0-full
 # .github/workflows) and a later stage just pulls the prebuilt result instead
 # of recompiling it. Defaults point at the local stage names, so a plain
 # `docker build .` on one machine still resolves them to the in-tree stages and
-# builds everything in a single shot -- BuildKit treats `COPY --from=<name>` as
-# a stage reference when <name> matches a stage, else as an image to pull.
+# builds everything in a single shot -- BuildKit treats `COPY --from=<name>` (or
+# `FROM <name>`, which is how ROCBLAS_IMAGE is consumed) as a stage reference
+# when <name> matches a stage, else as an image to pull.
+ARG ROCBLAS_IMAGE=rocblas-builder
 ARG MIGRAPHX_IMAGE=migraphx-builder
 ARG PYTORCH_IMAGE=pytorch-builder
 ARG ORT_IMAGE=ort-builder
@@ -99,8 +101,11 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 # Rebuilds rocBLAS for gfx900/gfx906 only; every other arch passes through
 # unchanged (this stage is a no-op for them -- /opt/rocm keeps the base
 # image's own prebuilt rocBLAS, which does have their kernels). Both
-# migraphx-builder and pytorch-builder build on top of this stage instead of
+# migraphx-builder and pytorch-builder build on ${ROCBLAS_IMAGE} instead of
 # python-base directly, so both see the rebuilt rocBLAS when it applies.
+# CI overrides ROCBLAS_IMAGE with the published rocm-rocblas-builder:<arch> on
+# those two arches, so the rebuild runs once in its own job instead of once per
+# dependent job; every other arch leaves it at the stage name above.
 #
 # Only fires for a single-arch build (ROCM_ARCH exactly "gfx900" or
 # "gfx906"), which is what CI always passes (see build-component.yml). A
@@ -226,7 +231,7 @@ RUN --mount=type=cache,target=/root/.ccache,id=rocblas-legacy-ccache \
     fi; \
     echo "OK: librocblas.so resolves to a ${ROCM_ARCH} build with a ${fatbin_size}-byte .hip_fatbin."
 
-FROM rocblas-builder AS migraphx-builder
+FROM ${ROCBLAS_IMAGE} AS migraphx-builder
 
 # Semicolon-separated GPU_TARGETS list, matching the breadth AMD's own
 # published images build for (CDNA1-3, RDNA2-4), not just this host's GPU.
@@ -385,7 +390,7 @@ RUN --mount=type=cache,target=/root/.ccache,id=migraphx-ccache \
 # of silently recompiling against a stale cache forever.
 RUN echo "${MIGRAPHX_REF} $(git -C /migraphx-src rev-parse HEAD)" > /opt/rocm/migraphx-version.txt
 
-FROM rocblas-builder AS pytorch-builder
+FROM ${ROCBLAS_IMAGE} AS pytorch-builder
 
 # No prebuilt wheel exists for this ROCm release yet (AMD's nightly index at
 # download.pytorch.org/whl/nightly/ only goes up to rocm7.2, this base is

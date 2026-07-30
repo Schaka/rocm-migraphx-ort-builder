@@ -1,7 +1,7 @@
 name: Build component
 
 # Reusable single-component build. Called once per component per arch by
-# nightly.yml, so migraphx / pytorch / ort / final each run as their own job on
+# nightly.yml, so rocblas / migraphx / pytorch / ort / final each run as their own job on
 # their own fresh runner with their own 360-minute budget, instead of all
 # racing a single 6h ceiling in one monolithic build. Each component pushes an
 # intermediate image (ghcr .../:<component>-<arch>) that the jobs downstream of
@@ -15,7 +15,7 @@ on:
         required: true
         type: string
       component:
-        description: 'Component name -- drives the image tag and cache ref (migraphx|pytorch|ort|final)'
+        description: 'Component name -- drives the image tag and cache ref (rocblas|migraphx|pytorch|ort|final)'
         required: true
         type: string
       target:
@@ -25,6 +25,11 @@ on:
         default: ''
       final:
         description: 'Tag as the published :latest-<arch>/:<date>-<arch> image instead of a :<component>-<arch> intermediate'
+        required: false
+        type: boolean
+        default: false
+      with-rocblas-image:
+        description: 'Pass ROCBLAS_IMAGE so this build starts FROM the prebuilt rocBLAS image instead of rebuilding that stage'
         required: false
         type: boolean
         default: false
@@ -97,8 +102,9 @@ jobs:
 
       # Assemble build-args, tags and the cache ref here (not inline in the
       # build step): each component publishes to its OWN ghcr package
-      # (rocm-migraphx-builder / -torch-builder / -ort-builder, final ->
-      # -ort-torch-builder) rather than sharing one package under many
+      # (rocm-rocblas-builder / rocm-migraphx-builder / -torch-builder /
+      # -ort-builder, final -> -ort-torch-builder) rather than sharing one
+      # package under many
       # component-prefixed tags, so a package's tags are only that component's
       # arches -- no incomplete-image tags cluttering the published product.
       # pkg() maps a component name to its full package ref; a build needs it
@@ -109,6 +115,7 @@ jobs:
           owner="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
           pkg() {
             case "$1" in
+              rocblas)  echo "${owner}/rocm-rocblas-builder" ;;
               migraphx) echo "${owner}/rocm-migraphx-builder" ;;
               pytorch)  echo "${owner}/rocm-migraphx-torch-builder" ;;
               ort)      echo "${owner}/rocm-migraphx-ort-builder" ;;
@@ -126,10 +133,12 @@ jobs:
           # develop-tracking ort/final tags, or reuse a stale develop-built
           # migraphx layer via cache. pytorch is independent of MIGraphX
           # entirely, so it always keeps the plain arch tag/cache regardless
-          # of migraphx-ref, and doesn't need rebuilding per-ref.
+          # of migraphx-ref, and doesn't need rebuilding per-ref. rocBLAS is
+          # upstream of migraphx and equally independent of its ref, so it's
+          # exempt too -- a pinned-ref run reuses the same rocBLAS image.
           ref="${{ inputs.migraphx-ref }}"
           suffix=""
-          if [ "$ref" != "develop" ] && [ "$component" != "pytorch" ]; then
+          if [ "$ref" != "develop" ] && [ "$component" != "pytorch" ] && [ "$component" != "rocblas" ]; then
             suffix="-$(echo "$ref" | tr -sc 'A-Za-z0-9' '-' | sed 's/^-*//;s/-*$//')"
           fi
           tag_arch="${arch}${suffix}"
@@ -142,6 +151,9 @@ jobs:
               if [ "$ref" = "develop" ]; then
                 echo "SOURCE_DATE=${{ steps.date.outputs.date }}"
               fi
+            fi
+            if [ "${{ inputs.with-rocblas-image }}" = "true" ]; then
+              echo "ROCBLAS_IMAGE=$(pkg rocblas):${arch}"
             fi
             if [ "${{ inputs.with-migraphx-image }}" = "true" ]; then
               echo "MIGRAPHX_IMAGE=$(pkg migraphx):${arch}${suffix}"

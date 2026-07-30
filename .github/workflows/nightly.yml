@@ -32,6 +32,15 @@ jobs:
     steps:
       - id: set
         run: |
+          # gfx803 shares this pipeline's packages but not its Dockerfile: it is
+          # built from gfx803/Dockerfile.gfx803 on a ROCm 6.4.x base by
+          # gfx803.yml, because ROCm 7 can't enumerate Polaris at all. Letting
+          # it through here would build the 7.14 Dockerfile for it and overwrite
+          # the good gfx803 tags with something that can't run.
+          if [ "${{ github.event.inputs.arch }}" = "gfx803" ]; then
+            echo "gfx803 is not built by this workflow -- run 'Build gfx803 (Polaris)' instead." >&2
+            exit 1
+          fi
           if [ -n "${{ github.event.inputs.arch }}" ]; then
             echo "arches=[\"${{ github.event.inputs.arch }}\"]" >> "$GITHUB_OUTPUT"
           else
