@@ -21,8 +21,9 @@ parallel; ONNX Runtime builds against MIGraphX's `/opt/rocm`; a final job
 assembles all three. Each component lands in its own package:
 
 - `rocm-rocblas-builder:<arch>` -- ROCm with rocBLAS rebuilt from source. Only
-  exists for the arches that need it (`gfx900`, `gfx906`, `gfx803`); MIGraphX and
-  PyTorch both start from it there instead of each rebuilding rocBLAS themselves
+  exists for the arches that need it (`gfx900`, `gfx906`, `gfx90c`, `gfx803`);
+  MIGraphX and PyTorch both start from it there instead of each rebuilding
+  rocBLAS themselves
 - `rocm-migraphx-builder:<arch>` -- from-source MIGraphX + ROCm deps in `/opt/rocm`
 - `rocm-migraphx-torch-builder:<arch>` -- PyTorch wheel
 - `rocm-migraphx-ort-builder:<arch>` -- ONNX Runtime wheel (built against MIGraphX)

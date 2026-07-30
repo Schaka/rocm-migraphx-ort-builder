@@ -237,7 +237,7 @@ FROM ${ROCBLAS_IMAGE} AS migraphx-builder
 # published images build for (CDNA1-3, RDNA2-4), not just this host's GPU.
 # Narrow it via --build-arg if you only need one target and want a faster
 # build.
-ARG ROCM_ARCH="gfx900;gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201"
+ARG ROCM_ARCH="gfx900;gfx90c;gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1033;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201"
 ARG LEGACY_GCN_ARCHES
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -312,8 +312,8 @@ RUN if echo "|${LEGACY_GCN_ARCHES}|" | grep -q "|${ROCM_ARCH}|"; then \
 # reproduced independently of any of our own build flags/caching:
 # device_name.hpp guards gfx_default_rocblas()'s DECLARATION behind
 # `#if MIGRAPHX_USE_HIPBLASLT`, but lowering.cpp's one call site has no
-# matching guard, so -DMIGRAPHX_USE_HIPBLASLT=Off (required on gfx900/gfx906
-# -- hipBLASLt has no kernels for either) fails to compile outright:
+# matching guard, so -DMIGRAPHX_USE_HIPBLASLT=Off (required on gfx900/gfx906/gfx90c
+# -- hipBLASLt has no kernels for any of them) fails to compile outright:
 # "no member named 'gfx_default_rocblas' in namespace 'migraphx::gpu'".
 # hipblaslt_supported() itself already returns a hardcoded false with the
 # flag off, which alone makes the enclosing `or` chain unconditionally true
@@ -358,11 +358,11 @@ RUN --mount=type=cache,target=/root/.ccache,id=migraphx-ccache \
         [ "$jobs" -lt 1 ] && jobs=1; \
     fi; \
     echo "rocMLIR/LLVM build: using $jobs parallel jobs"; \
-    # hipBLASLt's Tensile Logic tree has never had gfx900/gfx906 kernels
+    # hipBLASLt's Tensile Logic tree has never had gfx900/gfx906/gfx90c kernels
     # (oldest arch present is arcturus/gfx908, same fact that motivates
     # rocblas-builder above) -- link against the rocBLAS rebuilt there
     # instead of a hipBLASLt with nothing to dispatch to on this hardware.
-    # composable_kernel is denylisted for both by CK's own CMakeLists (see
+    # composable_kernel is denylisted for all three by CK's own CMakeLists (see
     # the requirements.txt strip above) -- MIGRAPHX_USE_COMPOSABLEKERNEL=Off
     # keeps MIGraphX's own cmake from expecting the CK package that was
     # never built.
@@ -397,7 +397,7 @@ FROM ${ROCBLAS_IMAGE} AS pytorch-builder
 # 7.14) -- build from source. Doesn't need MIGraphX, only the HIP/rocBLAS/
 # MIOpen/rocRAND stack already in this base image (or the gfx900/gfx906
 # rebuild from rocblas-builder above, on those two arches).
-ARG ROCM_ARCH="gfx900;gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201"
+ARG ROCM_ARCH="gfx900;gfx90c;gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1033;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201"
 ARG PYTORCH_VERSION=v2.12.0
 ARG BUILD_PARALLEL_LEVEL=auto
 
@@ -474,7 +474,7 @@ FROM ${PYTORCH_IMAGE} AS pytorch-export
 
 FROM python-base AS ort-builder
 
-ARG ROCM_ARCH="gfx900;gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201"
+ARG ROCM_ARCH="gfx900;gfx90c;gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1033;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201"
 ARG ORT_VERSION=v1.27.1
 
 COPY --from=migraphx-export /opt/rocm /opt/rocm
@@ -527,8 +527,8 @@ FROM ${ORT_IMAGE} AS ort-export
 FROM python-base
 
 ARG TORCH_BLAS_PREFER_HIPBLASLT
-# See the ARG's own comment near the top of this file. 0 only on gfx900/
-# gfx906; a no-op 1 everywhere else.
+# See the ARG's own comment near the top of this file. 0 only on
+# gfx900/gfx906/gfx90c; a no-op 1 everywhere else.
 ENV TORCH_BLAS_PREFER_HIPBLASLT=${TORCH_BLAS_PREFER_HIPBLASLT}
 
 COPY --from=migraphx-export /opt/rocm /opt/rocm
