@@ -87,12 +87,13 @@ RUN python3 -c "import onnxruntime as ort; print(ort.get_available_providers())"
   `numpy` to a version that only resolves against onnx's deps under 3.12, so
   every wheel built here and the final `/opt/venv` all target a uv-managed
   Python 3.12 instead of the base image's interpreter.
-- `ROCM_ARCH` (default `gfx900;gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;
-  gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201`) - semicolon-separated
-  `GPU_TARGETS`/`CMAKE_HIP_ARCHITECTURES`/`PYTORCH_ROCM_ARCH` list, matching
-  the breadth AMD's own published images build for. Narrow it to your one GPU
-  for a much faster build (quote it if it contains a `;`, e.g.
-  `--build-arg ROCM_ARCH=gfx1201`).
+- `ROCM_ARCH` (default `gfx900;gfx90c;gfx906;gfx908;gfx90a;gfx942;gfx950;
+  gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1033;gfx1034;gfx1035;
+  gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;
+  gfx1200;gfx1201`) - semicolon-separated `GPU_TARGETS`/`CMAKE_HIP_ARCHITECTURES`/
+  `PYTORCH_ROCM_ARCH` list, matching the breadth AMD's own published images
+  build for. Narrow it to your one GPU for a much faster build (quote it if it
+  contains a `;`, e.g. `--build-arg ROCM_ARCH=gfx1201`).
 - `ORT_VERSION` (default `v1.27.1`) - onnxruntime git tag.
 - `PYTORCH_VERSION` (default `v2.12.0`) - pytorch git tag.
 - `BUILD_PARALLEL_LEVEL` (default `auto`) - MIGraphX/rocMLIR and PyTorch build

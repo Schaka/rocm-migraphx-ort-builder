@@ -42,35 +42,35 @@ ARG ORT_IMAGE=ort-builder
 # develop-tracking one.
 ARG MIGRAPHX_REF=develop
 
-# rocBLAS release tag to rebuild from for gfx900/gfx906 (see rocblas-builder
-# below) -- must match BASE_IMAGE's ROCm release, since rocBLAS built against
-# a different release than the hipBLAS/rocSOLVER/etc it links against is not
-# a supported combination. AMD's prebuilt rocBLAS package for this ROCm line
-# ships no gfx900/gfx906 code objects at all (confirmed: no
-# amdrocm-blas*-gfx900/-gfx906 apt package exists, and the base image's
-# Tensile library on disk has no gfx900/gfx906 folder) -- but the *source*
-# still carries both (rocBLAS's own TARGET_LIST_ROCM_7.1 in CMakeLists.txt
-# still lists gfx900;gfx906:xnack-, and its Tensile Logic tree still has
-# vega10/vega20 folders), so rebuilding covers them without a ROCm-major
-# downgrade, unlike gfx803 (which needs one for CDNA... err Polaris's actual
-# ROCR enumeration break on ROCm 7).
+# rocBLAS release tag to rebuild from for gfx900/gfx906/gfx90c (see
+# rocblas-builder below) -- must match BASE_IMAGE's ROCm release, since rocBLAS
+# built against a different release than the hipBLAS/rocSOLVER/etc it links
+# against is not a supported combination. AMD's prebuilt rocBLAS package for
+# this ROCm line ships no gfx900/gfx906/gfx90c code objects at all (confirmed:
+# no amdrocm-blas*-gfx900/-gfx906/-gfx90c apt package exists, and the base
+# image's Tensile library on disk has no gfx900/gfx906/gfx90c folder) -- but
+# the *source* still carries them (rocBLAS's own TARGET_LIST_ROCM_7.1 in
+# CMakeLists.txt still lists gfx900;gfx906:xnack-, and its Tensile Logic tree
+# still has vega10/vega20 folders), so rebuilding covers them without a
+# ROCm-major downgrade, unlike gfx803 (which needs one for CDNA... err
+# Polaris's actual ROCR enumeration break on ROCm 7).
 ARG ROCM_VERSION=7.14.0
 
 # Single source of truth for which arches need the rocBLAS-from-source /
 # composable_kernel-off / hipBLASLt-off special-casing scattered through
 # rocblas-builder and migraphx-builder below (AMD's prebuilt packages for
-# this ROCm line ship no gfx900/gfx906 code objects at all, in rocBLAS,
+# this ROCm line ship no gfx900/gfx906/gfx90c code objects at all, in rocBLAS,
 # hipBLASLt, or composable_kernel). A shell `case ... in ${LEGACY_GCN_ARCHES})`
 # pattern, not a real list -- Docker build stages don't share shell state
 # across RUN layers, so this can't eliminate the repeated `case` scaffolding
-# itself, only keep the actual arch set in one place. Add a third arch here,
-# not in three separate case statements, if one ever needs the same treatment.
-ARG LEGACY_GCN_ARCHES="gfx900|gfx906"
+# itself, only keep the actual arch set in one place. Extend here if another
+# arch needs the same treatment.
+ARG LEGACY_GCN_ARCHES="gfx900|gfx906|gfx90c"
 
 # Runtime preference passed straight through to the final image's ENV.
-# Meaningless everywhere except gfx900/gfx906: PyTorch links hipBLASLt
+# Meaningless everywhere except gfx900/gfx906/gfx90c: PyTorch links hipBLASLt
 # unconditionally regardless of arch (cmake/Dependencies.cmake), but
-# hipBLASLt's own Tensile Logic tree has never had gfx900/gfx906 kernels
+# hipBLASLt's own Tensile Logic tree has never had gfx900/gfx906/gfx90c kernels
 # (oldest arch present is arcturus/gfx908) -- 0 forces GEMMs onto the
 # rocBLAS rebuilt below instead of a library with nothing to dispatch to.
 # 1 (the default) matches upstream's own default preference and is a
@@ -98,21 +98,21 @@ FROM ${BASE_IMAGE} AS python-base
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
     && uv python install 3.12
 
-# Rebuilds rocBLAS for gfx900/gfx906 only; every other arch passes through
-# unchanged (this stage is a no-op for them -- /opt/rocm keeps the base
+# Rebuilds rocBLAS for gfx900/gfx906/gfx90c only; every other arch passes
+# through unchanged (this stage is a no-op for them -- /opt/rocm keeps the base
 # image's own prebuilt rocBLAS, which does have their kernels). Both
 # migraphx-builder and pytorch-builder build on ${ROCBLAS_IMAGE} instead of
 # python-base directly, so both see the rebuilt rocBLAS when it applies.
 # CI overrides ROCBLAS_IMAGE with the published rocm-rocblas-builder:<arch> on
-# those two arches, so the rebuild runs once in its own job instead of once per
-# dependent job; every other arch leaves it at the stage name above.
+# those three arches, so the rebuild runs once in its own job instead of once
+# per dependent job; every other arch leaves it at the stage name above.
 #
-# Only fires for a single-arch build (ROCM_ARCH exactly "gfx900" or
-# "gfx906"), which is what CI always passes (see build-component.yml). A
+# Only fires for a single-arch build (ROCM_ARCH exactly "gfx900", "gfx906",
+# or "gfx90c"), which is what CI always passes (see build-component.yml). A
 # local one-shot `docker build .` using the default multi-arch ROCM_ARCH
 # list won't match the case below and won't rebuild -- that default is a
 # convenience fallback for arches that don't need this fix, not how
-# gfx900/gfx906 are actually meant to be built.
+# gfx900/gfx906/gfx90c are actually meant to be built.
 FROM python-base AS rocblas-builder
 
 ARG ROCM_ARCH

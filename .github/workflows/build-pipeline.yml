@@ -2,7 +2,7 @@ name: Build pipeline (single arch)
 
 # Runs the full [rocblas ->] migraphx -> ort -> final chain (plus the pytorch
 # build, which only depends on rocblas) for ONE arch. Called once per arch from
-# a matrix in nightly.yml. The rocblas job only exists for gfx900/gfx906.
+# a matrix in nightly.yml. The rocblas job only exists for gfx900/gfx906/gfx90c.
 #
 # This exists because `needs` in GitHub Actions is job-level, not
 # matrix-cell-level: if migraphx/ort/final were each their own matrixed job
@@ -29,13 +29,13 @@ on:
         default: false
 
 jobs:
-  # gfx900/gfx906 only: they're the only arches the Dockerfile rebuilds rocBLAS
-  # from source for, and elsewhere that stage is a no-op passthrough not worth
-  # publishing a full ROCm tree for. Its own job because migraphx and pytorch
-  # both build on top of it, and as separate jobs they'd otherwise each redo the
-  # (Tensile-heavy, hours-long) rebuild.
+  # gfx900/gfx906/gfx90c only: they're the only arches the Dockerfile rebuilds
+  # rocBLAS from source for, and elsewhere that stage is a no-op passthrough
+  # not worth publishing a full ROCm tree for. Its own job because migraphx and
+  # pytorch both build on top of it, and as separate jobs they'd otherwise each
+  # redo the (Tensile-heavy, hours-long) rebuild.
   rocblas:
-    if: ${{ inputs.arch == 'gfx900' || inputs.arch == 'gfx906' }}
+    if: ${{ inputs.arch == 'gfx900' || inputs.arch == 'gfx906' || inputs.arch == 'gfx90c' }}
     permissions:
       contents: read
       packages: write
@@ -64,7 +64,7 @@ jobs:
       arch: ${{ inputs.arch }}
       component: migraphx
       target: migraphx-builder
-      with-rocblas-image: ${{ inputs.arch == 'gfx900' || inputs.arch == 'gfx906' }}
+      with-rocblas-image: ${{ inputs.arch == 'gfx900' || inputs.arch == 'gfx906' || inputs.arch == 'gfx90c' }}
       migraphx-ref: ${{ inputs.migraphx-ref }}
       debug: ${{ inputs.debug }}
 
@@ -80,7 +80,7 @@ jobs:
       arch: ${{ inputs.arch }}
       component: pytorch
       target: pytorch-builder
-      with-rocblas-image: ${{ inputs.arch == 'gfx900' || inputs.arch == 'gfx906' }}
+      with-rocblas-image: ${{ inputs.arch == 'gfx900' || inputs.arch == 'gfx906' || inputs.arch == 'gfx90c' }}
       debug: ${{ inputs.debug }}
 
   ort:
