@@ -308,7 +308,7 @@ FROM ${ROCBLAS_IMAGE} AS migraphx-builder
 # published images build for (CDNA1-3, RDNA2-4), not just this host's GPU.
 # Narrow it via --build-arg if you only need one target and want a faster
 # build.
-ARG ROCM_ARCH="gfx900;gfx90c;gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1033;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201"
+ARG ROCM_ARCH="gfx900;gfx90c;gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201"
 ARG LEGACY_GCN_ARCHES
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -470,10 +470,9 @@ FROM ${ROCBLAS_IMAGE} AS pytorch-builder
 # gfx900/gfx906/gfx90c rebuild from rocblas-builder above, on those arches).
 #
 # Source-build fallback uses ROCm/pytorch fork, not upstream pytorch/pytorch.
-# AMD's fork has necessary ROCm fixes and updated composable_kernel submodule
-# (e.g., gfx1033 support) that upstream lags on. See
-# https://github.com/ROCm/TheRock/issues/6832.
-ARG ROCM_ARCH="gfx900;gfx90c;gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1033;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201"
+# AMD's fork carries ROCm fixes and a newer composable_kernel submodule that
+# upstream lags on.
+ARG ROCM_ARCH="gfx900;gfx90c;gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201"
 ARG PYTORCH_VERSION=v2.13.0
 ARG BUILD_PARALLEL_LEVEL=auto
 ARG USE_PREBUILT_PYTORCH=1
@@ -536,9 +535,8 @@ RUN --mount=type=cache,target=/root/.ccache,id=pytorch-ccache \
         echo "PyTorch build: using $jobs parallel jobs"; \
         ck_gemm=1; \
         if echo "|${LEGACY_GCN_ARCHES}|" | grep -q "|${ROCM_ARCH}|"; then \
-            echo "Legacy GCN arch (${ROCM_ARCH}): composable_kernel has no support for it" \
-                 "(same CK_BUFFER_RESOURCE_3RD_DWORD gap as gfx1033's upstream-vs-ROCm-fork" \
-                 "issue, but unfixable here since CK denylists gfx900/gfx906/gfx90c outright)" \
+            echo "Legacy GCN arch (${ROCM_ARCH}): composable_kernel denylists" \
+                 "gfx900/gfx906/gfx90c outright (undeclared CK_BUFFER_RESOURCE_3RD_DWORD)" \
                  "-- disabling PyTorch's own CK-based bgemm kernels (USE_ROCM_CK_GEMM)."; \
             ck_gemm=0; \
         fi; \
@@ -552,7 +550,7 @@ RUN --mount=type=cache,target=/root/.ccache,id=pytorch-ccache \
 
 FROM ${ROCBLAS_IMAGE} AS torchvision-builder
 
-ARG ROCM_ARCH="gfx900;gfx90c;gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1033;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201"
+ARG ROCM_ARCH="gfx900;gfx90c;gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201"
 ARG PYTORCH_VERSION=v2.13.0
 ARG BUILD_PARALLEL_LEVEL=auto
 ARG USE_PREBUILT_TORCHVISION=1
@@ -683,7 +681,7 @@ FROM ${TORCHAUDIO_IMAGE} AS torchaudio-export
 
 FROM python-base AS ort-builder
 
-ARG ROCM_ARCH="gfx900;gfx90c;gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1033;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201"
+ARG ROCM_ARCH="gfx900;gfx90c;gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201"
 ARG ORT_VERSION=v1.28.0
 
 COPY --from=migraphx-export /opt/rocm /opt/rocm

@@ -169,7 +169,7 @@ RUN python3 -c "import onnxruntime as ort; print(ort.get_available_providers())"
   the final `/opt/venv` all target a uv-managed Python 3.12 instead of the
   base image's interpreter.
 - `ROCM_ARCH` (default `gfx900;gfx90c;gfx906;gfx908;gfx90a;gfx942;gfx950;
-  gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1033;gfx1034;gfx1035;
+  gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1034;gfx1035;
   gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;
   gfx1200;gfx1201`) - semicolon-separated `GPU_TARGETS`/`CMAKE_HIP_ARCHITECTURES`/
   `PYTORCH_ROCM_ARCH` list, matching the breadth AMD's own published images

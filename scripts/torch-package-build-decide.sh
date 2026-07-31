@@ -42,7 +42,7 @@ set -eux
 #                             nightly build actually is, any pytorch version. Prebuilt wheels
 #                             bundle their own ROCm runtime, so pinning pytorch while floating
 #                             ROCm carries no ABI conflict risk.
-#   rocm_arch:                GPU arch (gfx1033, gfx1100, etc.) - required for pytorch/torchvision, ignored for torchaudio
+#   rocm_arch:                GPU arch (gfx1100, gfx1201, etc.) - required for pytorch/torchvision, ignored for torchaudio
 #   use_prebuilt:             Try prebuilt wheels first if set to 1 (default: 0)
 #   rocm_release:             ROCm release (7.14, 7.13, etc.). Empty = nightly build
 #   pytorch_resolved_version: torchvision/torchaudio only -- pytorch's exact resolved version
