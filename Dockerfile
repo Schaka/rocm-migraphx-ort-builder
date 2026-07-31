@@ -395,11 +395,17 @@ FROM ${ROCBLAS_IMAGE} AS pytorch-builder
 # No prebuilt wheel exists for this ROCm release yet (AMD's nightly index at
 # download.pytorch.org/whl/nightly/ only goes up to rocm7.2, this base is
 # 7.14) -- build from source. Doesn't need MIGraphX, only the HIP/rocBLAS/
-# MIOpen/rocRAND stack already in this base image (or the gfx900/gfx906
-# rebuild from rocblas-builder above, on those two arches).
+# MIOpen/rocRAND stack already in this base image (or the gfx900/gfx906/gfx90c
+# rebuild from rocblas-builder above, on those arches).
+#
+# Build from ROCm/pytorch fork, not upstream pytorch/pytorch. AMD's fork has
+# necessary ROCm fixes and updated composable_kernel submodule (e.g., gfx1033
+# support) that upstream lags on. See https://github.com/ROCm/TheRock/issues/6832.
 ARG ROCM_ARCH="gfx900;gfx90c;gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1033;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201"
 ARG PYTORCH_VERSION=v2.13.0
 ARG BUILD_PARALLEL_LEVEL=auto
+ARG USE_PREBUILT_PYTORCH=0
+ARG ROCM_RELEASE=7.14
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git cmake ninja-build build-essential \
@@ -415,8 +421,11 @@ RUN uv venv /build-venv --python 3.12 \
         numpy pyyaml typing_extensions requests setuptools wheel six
 ENV PATH=/build-venv/bin:$PATH
 
-RUN git clone --recursive --branch ${PYTORCH_VERSION} --depth 1 --shallow-submodules \
-        https://github.com/pytorch/pytorch.git /pytorch
+COPY scripts/pytorch-build-decide.sh /tmp/
+RUN chmod +x /tmp/pytorch-build-decide.sh && \
+    PYTORCH_BRANCH=$(/tmp/pytorch-build-decide.sh "${PYTORCH_VERSION}" "${ROCM_ARCH}" "${USE_PREBUILT_PYTORCH}" "${ROCM_RELEASE}") && \
+    git clone --recursive --branch "${PYTORCH_BRANCH}" --depth 1 --shallow-submodules \
+        https://github.com/ROCm/pytorch.git /pytorch
 
 WORKDIR /pytorch
 # setup.py does NOT hipify CUDA sources itself -- tools/amd_build/build_amd.py
