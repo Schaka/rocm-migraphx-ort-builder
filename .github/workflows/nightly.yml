@@ -25,6 +25,49 @@ on:
 # arches run fully independently of each other -- one arch's migraphx build
 # never blocks another arch's ort/final.
 jobs:
+  # Builds and publishes our own self-built ROCm base (Dockerfile's `rocm-builder` stage,
+  # tracking TheRock's nightly .deb feed) BEFORE the arch matrix, not per-arch -- it's
+  # arch-independent (one image covers every gfx target), and running it once here means a
+  # broken base build fails fast instead of being silently rebuilt (and re-failing) inside every
+  # one of the ~26 per-arch pipeline runs below. `build` depends on this job, so a failure here
+  # stops the whole nightly run before the matrix ever starts.
+  rocm-base:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      base-image: ${{ steps.meta.outputs.base-image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: date
+        run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+      - id: meta
+        run: |
+          owner="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+          echo "base-image=${owner}/rocm-builder:latest" >> "$GITHUB_OUTPUT"
+          echo "dated-image=${owner}/rocm-builder:${{ steps.date.outputs.date }}" >> "$GITHUB_OUTPUT"
+          echo "cache-ref=${owner}/rocm-builder:cache" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          target: rocm-builder
+          tags: |
+            ${{ steps.meta.outputs.base-image }}
+            ${{ steps.meta.outputs.dated-image }}
+          build-args: |
+            SOURCE_DATE=${{ steps.date.outputs.date }}
+          cache-from: type=registry,ref=${{ steps.meta.outputs.cache-ref }}
+          cache-to: type=registry,ref=${{ steps.meta.outputs.cache-ref }},mode=max
+
   set-matrix:
     runs-on: ubuntu-latest
     outputs:
@@ -48,7 +91,7 @@ jobs:
           fi
 
   build:
-    needs: set-matrix
+    needs: [set-matrix, rocm-base]
     permissions:
       contents: read
       packages: write
@@ -60,5 +103,14 @@ jobs:
     secrets: inherit
     with:
       arch: ${{ matrix.arch }}
+      base-image: ${{ needs.rocm-base.outputs.base-image }}
       migraphx-ref: ${{ github.event_name == 'workflow_dispatch' && inputs.migraphx-ref || 'develop' }}
+      # Nightly means fully floating: pytorch version and ROCm release must be passed as an
+      # explicit empty string, not omitted -- omitting them would inherit build-component.yml's
+      # own default, which used to silently equal the Dockerfile's *pinned* PYTORCH_VERSION
+      # default (v2.13.0) because nothing here ever overrode it. See torch-package-build-decide.sh's
+      # header comment and README.md for the ROCm-10 nightly-discovery background.
+      pytorch-version: ''
+      rocm-release: ''
+      use-prebuilt: true
       debug: ${{ github.event_name == 'workflow_dispatch' && inputs.debug }}

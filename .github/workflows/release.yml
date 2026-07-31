@@ -1,30 +1,62 @@
 name: Release build
 
-# Triggered by pushing a version tag (e.g. "v7.14.0"), NOT on a schedule --
-# unlike nightly.yml, a release build pins every moving part (MIGraphX ref,
-# and the resulting image tag) to an immutable ROCm line, so there is nothing
-# to gain from rebuilding it unattended. rocBLAS's source ref (ROCM_VERSION),
-# the base image, and ORT_VERSION/PYTORCH_VERSION are already static Dockerfile
-# defaults (see Dockerfile) -- kept in sync with whatever ROCm line this tag
-# targets is a manual bump of the Dockerfile itself, done before tagging.
+# Manually triggered ("Run workflow" in the Actions tab, or `gh workflow run
+# release.yml -f ...`), NOT reactive to git tags -- a release build pins every
+# moving part (BASE_IMAGE, ROCM_RELEASE, MIGraphX ref, PyTorch version, ORT
+# version) to an immutable ROCm line via workflow inputs, no Dockerfile edit
+# required.
 #
-# The tag's major.minor (e.g. "7.14" out of "v7.14.0") drives both:
+# rocm_version's major.minor (e.g. "7.14" out of "7.14.0") drives:
 #   - migraphx-ref: release/rocm-rel-<major.minor>, MIGraphX's own stable
-#     branch for that ROCm line (not develop)
+#     branch for that ROCm line (not develop) -- unless the migraphx_ref
+#     input is set, which overrides this independently of rocm_version (e.g.
+#     pin ROCm/PyTorch/ORT to 7.14 while still tracking MIGraphX's develop).
 #   - release-tag: rocm<major.minor>, passed through build-pipeline.yml so
 #     build-component.yml publishes a single immutable "rocm7.14-<arch>"
 #     final tag instead of the develop-tracking :latest-<arch>/:<date>-<arch>
 #     pair. Point downstream consumers at that tag for a stable, reproducible
 #     build.
+#   - rocm-release: same major.minor, passed as ROCM_RELEASE so pytorch's
+#     wheel discovery AND rocblas's from-source rebuild (gfx900/906/90c) both
+#     pin to this exact ROCm line instead of floating.
 #
 # Same per-arch fan-out as nightly.yml, minus gfx803 (different Dockerfile,
 # different ROCm major entirely -- see gfx803/README.md; it stays on its own
-# manual gfx803.yml workflow and isn't part of this tag scheme).
+# manual gfx803.yml workflow and isn't part of this scheme).
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
+    inputs:
+      rocm_version:
+        description: 'ROCm version to pin (X.Y.Z), matching a real rocm/dev-ubuntu-26.04 tag and repo.radeon.com/rocm/apt/ release. Drives BASE_IMAGE, ROCM_RELEASE, and (unless migraphx_ref below overrides it) MIGRAPHX_REF.'
+        required: false
+        default: '7.14.0'
+      migraphx_ref:
+        description: 'Git ref to build MIGraphX from (branch/tag). Leave empty to derive release/rocm-rel-<rocm_version major.minor> automatically; set explicitly (e.g. "develop") to track it independently of rocm_version -- e.g. pin ROCm/PyTorch/ORT to 7.14 while MIGraphX still builds from develop.'
+        required: false
+        default: ''
+      pytorch_version:
+        description: 'PyTorch version to pin (X.Y.Z, no "v" prefix).'
+        required: false
+        default: '2.13.0'
+      ort_version:
+        description: 'ONNX Runtime git tag to build (e.g. "v1.28.0").'
+        required: false
+        default: 'v1.28.0'
+      use_prebuilt:
+        description: 'Try prebuilt AMD wheels for pytorch/torchvision/torchaudio first (falls back to source per-package if none match). Uncheck to force a full from-source build of all three.'
+        type: boolean
+        required: false
+        default: true
+      arch:
+        description: 'Single gfx arch to build (e.g. gfx1201). Leave empty for the full matrix (all supported arches except gfx803).'
+        required: false
+        default: ''
+      debug:
+        description: 'Open an SSH debug session (tmate) into the runner for the duration of the build'
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   set-version:
@@ -32,30 +64,61 @@ jobs:
     outputs:
       migraphx-ref: ${{ steps.parse.outputs.migraphx-ref }}
       release-tag: ${{ steps.parse.outputs.release-tag }}
+      base-image: ${{ steps.parse.outputs.base-image }}
+      rocm-release: ${{ steps.parse.outputs.rocm-release }}
     steps:
       - id: parse
         run: |
-          tag="${GITHUB_REF_NAME}"
-          ver="$(echo "$tag" | sed -E 's/^v([0-9]+\.[0-9]+).*/\1/')"
-          if [ "$ver" = "$tag" ]; then
-            echo "Tag '${tag}' doesn't match vMAJOR.MINOR[.PATCH]" >&2
+          ver="${{ inputs.rocm_version }}"
+          major_minor="$(echo "$ver" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')"
+          if [ "$major_minor" = "$ver" ]; then
+            echo "rocm_version '${ver}' doesn't match X.Y or X.Y.Z" >&2
             exit 1
           fi
-          echo "migraphx-ref=release/rocm-rel-${ver}" >> "$GITHUB_OUTPUT"
-          echo "release-tag=rocm${ver}" >> "$GITHUB_OUTPUT"
+          if [ -n "${{ inputs.migraphx_ref }}" ]; then
+            echo "migraphx-ref=${{ inputs.migraphx_ref }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "migraphx-ref=release/rocm-rel-${major_minor}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "release-tag=rocm${major_minor}" >> "$GITHUB_OUTPUT"
+          echo "base-image=rocm/dev-ubuntu-26.04:${ver}-full" >> "$GITHUB_OUTPUT"
+          echo "rocm-release=${major_minor}" >> "$GITHUB_OUTPUT"
+
+  set-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      arches: ${{ steps.set.outputs.arches }}
+    steps:
+      - id: set
+        run: |
+          if [ "${{ inputs.arch }}" = "gfx803" ]; then
+            echo "gfx803 is not built by this workflow -- run 'Build gfx803 (Polaris)' instead." >&2
+            exit 1
+          fi
+          if [ -n "${{ inputs.arch }}" ]; then
+            echo "arches=[\"${{ inputs.arch }}\"]" >> "$GITHUB_OUTPUT"
+          else
+            echo 'arches=["gfx900","gfx90c","gfx906","gfx908","gfx90a","gfx942","gfx950","gfx1010","gfx1011","gfx1012","gfx1030","gfx1031","gfx1032","gfx1033","gfx1034","gfx1035","gfx1036","gfx1100","gfx1101","gfx1102","gfx1103","gfx1150","gfx1151","gfx1152","gfx1153","gfx1200","gfx1201"]' >> "$GITHUB_OUTPUT"
+          fi
 
   build:
-    needs: set-version
+    needs: [set-version, set-matrix]
     permissions:
       contents: read
       packages: write
     strategy:
       fail-fast: false
       matrix:
-        arch: ["gfx900","gfx90c","gfx906","gfx908","gfx90a","gfx942","gfx950","gfx1010","gfx1011","gfx1012","gfx1030","gfx1031","gfx1032","gfx1033","gfx1034","gfx1035","gfx1036","gfx1100","gfx1101","gfx1102","gfx1103","gfx1150","gfx1151","gfx1152","gfx1153","gfx1200","gfx1201"]
+        arch: ${{ fromJSON(needs.set-matrix.outputs.arches) }}
     uses: ./.github/workflows/build-pipeline.yml
     secrets: inherit
     with:
       arch: ${{ matrix.arch }}
       migraphx-ref: ${{ needs.set-version.outputs.migraphx-ref }}
       release-tag: ${{ needs.set-version.outputs.release-tag }}
+      base-image: ${{ needs.set-version.outputs.base-image }}
+      rocm-release: ${{ needs.set-version.outputs.rocm-release }}
+      pytorch-version: v${{ inputs.pytorch_version }}
+      use-prebuilt: ${{ inputs.use_prebuilt }}
+      ort-version: ${{ inputs.ort_version }}
+      debug: ${{ inputs.debug }}

@@ -58,6 +58,31 @@ on:
         required: false
         type: string
         default: ''
+      pytorch-version:
+        description: 'PYTORCH_VERSION build-arg override (e.g. "v2.13.0"). Empty keeps the Dockerfile default on the pytorch/torchvision/torchaudio targets (nightly wants this passed as an explicit empty string, not omitted, so it truly floats instead of falling back to the Dockerfile default).'
+        required: false
+        type: string
+        default: ''
+      rocm-release:
+        description: 'ROCM_RELEASE build-arg override (e.g. "7.14"). Empty = nightly-mode wheel discovery on whichever target reads it, and (on rocblas) build from rocm-libraries'' own develop branch instead of a pinned therock-<release> tag.'
+        required: false
+        type: string
+        default: ''
+      base-image:
+        description: 'BASE_IMAGE build-arg override. Empty keeps the Dockerfile default (rocm/dev-ubuntu-26.04:7.14.0-full).'
+        required: false
+        type: string
+        default: ''
+      use-prebuilt:
+        description: 'Sets USE_PREBUILT_PYTORCH/TORCHVISION/TORCHAUDIO together (true = 1, false = 0). Only meaningful for the pytorch/torchvision/torchaudio targets.'
+        required: false
+        type: boolean
+        default: true
+      ort-version:
+        description: 'ORT_VERSION build-arg override (e.g. "v1.28.0"). Empty keeps the Dockerfile default. Only meaningful for the ort target.'
+        required: false
+        type: string
+        default: ''
       debug:
         description: 'Open an SSH debug session (tmate) into the runner for the duration of the build'
         required: false
@@ -140,16 +165,26 @@ jobs:
           # entirely, so it always keeps the plain arch tag/cache regardless
           # of migraphx-ref, and doesn't need rebuilding per-ref. rocBLAS is
           # upstream of migraphx and equally independent of its ref, so it's
-          # exempt too -- a pinned-ref run reuses the same rocBLAS image.
+          # exempt too -- a pinned-ref (nightly, develop-tracking-migraphx-only)
+          # run reuses the same rocBLAS/pytorch image.
+          #
+          # A manual release build is a different case entirely: release_tag
+          # (e.g. "rocm7.14") applies to EVERY component, including pytorch and
+          # rocblas -- both actually do vary by ROCm release (rocblas is
+          # rebuilt from a ROCM_RELEASE-pinned source ref; pytorch's own
+          # PYTORCH_VERSION/ROCM_RELEASE build-args differ in release mode).
+          # Exempting them here would tag a release build's pytorch/rocblas
+          # image with the exact same plain "<arch>" tag nightly already uses
+          # for that arch, silently overwriting (or being overwritten by)
+          # whichever build ran more recently instead of being its own
+          # versioned artifact.
           ref="${{ inputs.migraphx-ref }}"
           release_tag="${{ inputs.release-tag }}"
           suffix=""
-          if [ "$component" != "pytorch" ] && [ "$component" != "rocblas" ]; then
-            if [ -n "$release_tag" ]; then
-              suffix="-${release_tag}"
-            elif [ "$ref" != "develop" ]; then
-              suffix="-$(echo "$ref" | tr -sc 'A-Za-z0-9' '-' | sed 's/^-*//;s/-*$//')"
-            fi
+          if [ -n "$release_tag" ]; then
+            suffix="-${release_tag}"
+          elif [ "$component" != "pytorch" ] && [ "$component" != "rocblas" ] && [ "$ref" != "develop" ]; then
+            suffix="-$(echo "$ref" | tr -sc 'A-Za-z0-9' '-' | sed 's/^-*//;s/-*$//')"
           fi
           tag_arch="${arch}${suffix}"
 
@@ -163,13 +198,13 @@ jobs:
               fi
             fi
             if [ "${{ inputs.with-rocblas-image }}" = "true" ]; then
-              echo "ROCBLAS_IMAGE=$(pkg rocblas):${arch}"
+              echo "ROCBLAS_IMAGE=$(pkg rocblas):${tag_arch}"
             fi
             if [ "${{ inputs.with-migraphx-image }}" = "true" ]; then
               echo "MIGRAPHX_IMAGE=$(pkg migraphx):${arch}${suffix}"
             fi
             if [ "${{ inputs.with-pytorch-image }}" = "true" ]; then
-              echo "PYTORCH_IMAGE=$(pkg pytorch):${arch}"
+              echo "PYTORCH_IMAGE=$(pkg pytorch):${tag_arch}"
             fi
             if [ "${{ inputs.with-ort-image }}" = "true" ]; then
               echo "ORT_IMAGE=$(pkg ort):${arch}${suffix}"
@@ -180,6 +215,23 @@ jobs:
             case "${arch}" in
               gfx900|gfx906|gfx90c) echo "TORCH_BLAS_PREFER_HIPBLASLT=0" ;;
             esac
+            # PYTORCH_VERSION/ROCM_RELEASE are always emitted, even empty -- a `docker build
+            # --build-arg PYTORCH_VERSION=` (empty) is NOT the same as omitting the flag: an
+            # explicit empty value wins over the Dockerfile ARG's own default, which is exactly
+            # what nightly needs (float fully) instead of silently inheriting the pinned
+            # default. Harmless on targets that don't read these ARGs at all.
+            echo "PYTORCH_VERSION=${{ inputs.pytorch-version }}"
+            echo "ROCM_RELEASE=${{ inputs.rocm-release }}"
+            if [ -n "${{ inputs.base-image }}" ]; then
+              echo "BASE_IMAGE=${{ inputs.base-image }}"
+            fi
+            if [ -n "${{ inputs.ort-version }}" ]; then
+              echo "ORT_VERSION=${{ inputs.ort-version }}"
+            fi
+            use_prebuilt="${{ inputs.use-prebuilt == true && '1' || '0' }}"
+            echo "USE_PREBUILT_PYTORCH=${use_prebuilt}"
+            echo "USE_PREBUILT_TORCHVISION=${use_prebuilt}"
+            echo "USE_PREBUILT_TORCHAUDIO=${use_prebuilt}"
             echo "ARGS_EOF"
           } >> "$GITHUB_OUTPUT"
 

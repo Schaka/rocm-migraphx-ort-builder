@@ -19,7 +19,14 @@
 # One consistent stack is worth the extra build time.
 #
 # Build: docker build -t <tag> .
-ARG BASE_IMAGE=rocm/dev-ubuntu-26.04:7.14.0-full
+#
+# Defaults to our own nightly-built ROCm base (see the rocm-builder stage below) rather than
+# AMD's own rocm/dev-ubuntu-26.04 image, since AMD publishes no rolling/nightly tag for that
+# image at all -- see README.md's "Nightly ROCm versioning" section. The manual release
+# workflow explicitly overrides this to the AMD-pinned tag instead (it already overrides every
+# other version-related ARG by hand, so one more is no added burden); nightly leaves it at this
+# default and gets our own self-built, TheRock-nightly-tracking base.
+ARG BASE_IMAGE=ghcr.io/schaka/rocm-builder:latest
 
 # Component-image references. Downstream stages COPY each component's artifacts
 # from these, so in CI every component can be built as its own job/image (see
@@ -32,6 +39,8 @@ ARG BASE_IMAGE=rocm/dev-ubuntu-26.04:7.14.0-full
 ARG ROCBLAS_IMAGE=rocblas-builder
 ARG MIGRAPHX_IMAGE=migraphx-builder
 ARG PYTORCH_IMAGE=pytorch-builder
+ARG TORCHVISION_IMAGE=torchvision-builder
+ARG TORCHAUDIO_IMAGE=torchaudio-builder
 ARG ORT_IMAGE=ort-builder
 
 # Git ref to build MIGraphX from. Defaults to the moving `develop` branch;
@@ -54,7 +63,12 @@ ARG MIGRAPHX_REF=develop
 # still has vega10/vega20 folders), so rebuilding covers them without a
 # ROCm-major downgrade, unlike gfx803 (which needs one for CDNA... err
 # Polaris's actual ROCR enumeration break on ROCm 7).
-ARG ROCM_VERSION=7.14.0
+#
+# Same ARG pytorch/torchvision/torchaudio's own wheel-discovery below reads
+# (major.minor, e.g. "7.14"; empty = nightly float). rocblas-builder builds
+# from rocm-libraries' own `develop` branch when this is empty, matching
+# MIGraphX's own default, instead of a pinned `therock-<release>` tag.
+ARG ROCM_RELEASE=
 
 # Single source of truth for which arches need the rocBLAS-from-source /
 # composable_kernel-off / hipBLASLt-off special-casing scattered through
@@ -87,6 +101,61 @@ ARG TORCH_BLAS_PREFER_HIPBLASLT=1
 # commits already change the cache key when it moves.
 ARG SOURCE_DATE=unknown
 
+# Self-built ROCm base from TheRock's nightly .deb feed -- what BASE_IMAGE defaults to above.
+# CI builds and publishes this as its own component (ghcr.io/<owner>/rocm-builder:latest and
+# :<date>, see nightly.yml), same pattern as rocblas-builder/migraphx-builder/etc below, just
+# arch-independent (amdrocm-hpc-sdk pulls in every gfx target's runtime bits in one package, so
+# there's exactly one of these, not one per arch).
+#
+# Validated end-to-end: a real gfx1201 build ran clean through migraphx-builder and
+# pytorch-builder against this stage. Package layout under "amdrocm-*" does differ from
+# rocm/dev-ubuntu-26.04 (see the two fixes below -- top-level symlinks and the -dev packages).
+#
+# No GPG verification ([trusted=yes]) -- this is an internal nightly-only path, not the release
+# path (which explicitly overrides BASE_IMAGE to AMD's own signed rocm/dev-ubuntu image instead);
+# acceptable for the same reason nightly already accepts cross-component date drift (README.md).
+FROM ubuntu:26.04 AS rocm-builder
+ARG THEROCK_DEB_INDEX=https://rocm.nightlies.amd.com/packages-multi-arch/deb/
+# Referenced (as a no-op echo) purely to bust this RUN's layer cache -- same reasoning as
+# MIGraphX's SOURCE_DATE usage above: the RUN command's own text never changes, so without this,
+# `cache-from` would replay whatever dated snapshot was resolved the very first time this stage
+# was ever built, forever. CI passes today's date here on every nightly run.
+ARG SOURCE_DATE
+RUN set -eux; \
+    echo "rocm-builder snapshot: ${SOURCE_DATE}"; \
+    apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg2 \
+    && rm -rf /var/lib/apt/lists/*; \
+    # TheRock's deb feed has no "latest" alias, only dated YYYYMMDD-<run-id> directories -- same
+    # "resolve newest yourself" problem the wheel-index discovery functions above solve, just for
+    # a directory listing instead of wheel filenames. The bare index URL serves a stale cached
+    # snapshot (observed capped at a months-old page); a throwaway query string busts that cache
+    # and gets the real, current listing back.
+    latest=$(curl -s "${THEROCK_DEB_INDEX}?_=$(date +%s)" | grep -oE 'href="[0-9]{8}-[0-9]+/index.html"' \
+        | sed 's/href="//; s|/index.html"||' | sort -V | tail -1); \
+    if [ -z "$latest" ]; then echo "FATAL: no dated build dir found under ${THEROCK_DEB_INDEX}" >&2; exit 1; fi; \
+    echo "Using TheRock nightly deb snapshot: ${latest}"; \
+    echo "deb [trusted=yes] ${THEROCK_DEB_INDEX}${latest}/ stable main" > /etc/apt/sources.list.d/therock-nightly.list; \
+    # amdrocm-hpc-sdk pulls "-dev" packages for peripheral libs (rocALUTION, hipTensor) but NOT
+    # for the core HIP runtime itself -- confirmed by `dpkg -l` after install: amdrocm-runtime10.1
+    # (the runtime .so) was present, amdrocm-runtime-dev/amdrocm-core-dev (headers + HIP's own
+    # hip-config.cmake) were not, which is exactly why rocMLIR's cmake configure step below fails
+    # with "Could not find a package configuration file provided by hip". Install them explicitly.
+    apt-get update && apt-get install -y --no-install-recommends \
+        amdrocm-hpc-sdk amdrocm-core-dev amdrocm-runtime-dev \
+    && rm -rf /var/lib/apt/lists/*; \
+    # amdrocm-hpc-sdk lands everything under /opt/rocm/core-<major.minor>/ (bin, include, lib,
+    # libexec, llvm, share, amdgcn) with NO top-level convenience symlinks -- unlike
+    # rocm/dev-ubuntu-26.04, which symlinks include/lib/share/etc at /opt/rocm/ straight into its
+    # own versioned core dir (see rocblas-builder's comment below for that same layout on the
+    # official image). Every other stage in this Dockerfile hardcodes paths like
+    # /opt/rocm/llvm/bin/clang++ and /opt/rocm/lib -- recreate those top-level symlinks here so
+    # this base is a drop-in for what they expect, instead of patching every consumer.
+    core_dir=$(find /opt/rocm -mindepth 1 -maxdepth 1 -type d -name 'core-*' | head -1); \
+    if [ -z "$core_dir" ]; then echo "FATAL: no /opt/rocm/core-* dir found after install" >&2; exit 1; fi; \
+    for d in "$core_dir"/*; do \
+        ln -s "$(basename "$core_dir")/$(basename "$d")" "/opt/rocm/$(basename "$d")"; \
+    done
+
 # Shared ancestor for every stage below: this base image's native python3 is
 # 3.14, but AudioMuse-AI (and other downstream consumers) pin numpy in a way
 # that only resolves against onnx's deps under 3.12 -- so every wheel built
@@ -116,15 +185,17 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 FROM python-base AS rocblas-builder
 
 ARG ROCM_ARCH
-ARG ROCM_VERSION
+ARG ROCM_RELEASE
 ARG BUILD_PARALLEL_LEVEL=auto
 ARG LEGACY_GCN_ARCHES
 
 # rocBLAS's standalone repo (ROCm/rocBLAS) stopped at v14.3.0 and is
 # deprecated -- current development moved into the ROCm/rocm-libraries
-# monorepo, tagged "therock-<major>.<minor>" (no patch component, unlike
-# this file's own ROCM_VERSION/BASE_IMAGE tags). Confirmed at the
-# therock-7.14 tag specifically (not just develop): projects/rocblas/
+# monorepo, tagged "therock-<major>.<minor>" (no patch component -- exactly
+# what ROCM_RELEASE already is). Empty ROCM_RELEASE (nightly, fully floating)
+# builds from the monorepo's own `develop` branch instead of a pinned tag,
+# matching MIGraphX's own default below. Confirmed at the therock-7.14 tag
+# specifically (not just develop): projects/rocblas/
 # CMakeLists.txt's TARGET_LIST_ROCM_7.13 still lists gfx900;gfx906:xnack-,
 # and projects/rocblas/library/src/blas3/Tensile/Logic/asm_full/ still has
 # vega10 (gfx900) and vega20 (gfx906) folders. Tensile is no longer a git
@@ -161,7 +232,7 @@ RUN --mount=type=cache,target=/root/.ccache,id=rocblas-legacy-ccache \
         ln -s "$f" "/usr/local/lib/cmake/msgpackc-cxx/$(basename "$f" | sed 's/^msgpack-cxx/msgpackc-cxx/')"; \
     done; \
     pip3 install --break-system-packages --no-cache-dir pyyaml joblib; \
-    monorepo_ref="therock-$(echo "${ROCM_VERSION}" | cut -d. -f1,2)"; \
+    if [ -z "${ROCM_RELEASE}" ]; then monorepo_ref="develop"; else monorepo_ref="therock-${ROCM_RELEASE}"; fi; \
     echo "rocBLAS source: ROCm/rocm-libraries @ ${monorepo_ref} (projects/rocblas)"; \
     git clone --filter=blob:none --depth 1 --no-checkout \
         --branch "${monorepo_ref}" \
@@ -392,20 +463,22 @@ RUN echo "${MIGRAPHX_REF} $(git -C /migraphx-src rev-parse HEAD)" > /opt/rocm/mi
 
 FROM ${ROCBLAS_IMAGE} AS pytorch-builder
 
-# No prebuilt wheel exists for this ROCm release yet (AMD's nightly index at
-# download.pytorch.org/whl/nightly/ only goes up to rocm7.2, this base is
-# 7.14) -- build from source. Doesn't need MIGraphX, only the HIP/rocBLAS/
-# MIOpen/rocRAND stack already in this base image (or the gfx900/gfx906/gfx90c
-# rebuild from rocblas-builder above, on those arches).
+# torch-package-build-decide.sh (see its own invocation below) checks AMD's
+# per-arch nightly/release wheel indices first and falls back to a from-source
+# build only when no matching wheel exists there -- doesn't need MIGraphX,
+# only the HIP/rocBLAS/MIOpen/rocRAND stack already in this base image (or the
+# gfx900/gfx906/gfx90c rebuild from rocblas-builder above, on those arches).
 #
-# Build from ROCm/pytorch fork, not upstream pytorch/pytorch. AMD's fork has
-# necessary ROCm fixes and updated composable_kernel submodule (e.g., gfx1033
-# support) that upstream lags on. See https://github.com/ROCm/TheRock/issues/6832.
+# Source-build fallback uses ROCm/pytorch fork, not upstream pytorch/pytorch.
+# AMD's fork has necessary ROCm fixes and updated composable_kernel submodule
+# (e.g., gfx1033 support) that upstream lags on. See
+# https://github.com/ROCm/TheRock/issues/6832.
 ARG ROCM_ARCH="gfx900;gfx90c;gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1033;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201"
 ARG PYTORCH_VERSION=v2.13.0
 ARG BUILD_PARALLEL_LEVEL=auto
-ARG USE_PREBUILT_PYTORCH=0
-ARG ROCM_RELEASE=7.14
+ARG USE_PREBUILT_PYTORCH=1
+ARG ROCM_RELEASE=
+ARG LEGACY_GCN_ARCHES
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git cmake ninja-build build-essential \
@@ -416,60 +489,185 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # python3 is 3.14, but the wheel this stage produces has to load into the
 # final stage's venv, which is pinned to 3.12 for AudioMuse-AI's numpy/onnx
 # pin compatibility -- so build against that same 3.12, not the system one.
-RUN uv venv /build-venv --python 3.12 \
+RUN uv venv /build-venv --python 3.12 --seed \
     && uv pip install --python /build-venv/bin/python3 \
         numpy pyyaml typing_extensions requests setuptools wheel six
 ENV PATH=/build-venv/bin:$PATH
 
-COPY scripts/pytorch-build-decide.sh /tmp/
-RUN chmod +x /tmp/pytorch-build-decide.sh && \
-    PYTORCH_BRANCH=$(/tmp/pytorch-build-decide.sh "${PYTORCH_VERSION}" "${ROCM_ARCH}" "${USE_PREBUILT_PYTORCH}" "${ROCM_RELEASE}") && \
-    git clone --recursive --branch "${PYTORCH_BRANCH}" --depth 1 --shallow-submodules \
-        https://github.com/ROCm/pytorch.git /pytorch
+# torch-package-build-decide.sh outputs either:
+#   PIP:<package>==<version>:<index_url>   -- prebuilt wheel exists, let pip/uv resolve it
+#                                              (auto-picks the right cp312 wheel AND every
+#                                              transitive dep -- rocm-sdk-core, triton, etc.
+#                                              -- that a bare `curl` download would miss)
+#   SOURCE:<repo>:<branch>                 -- no prebuilt wheel, build from source
+# mkdir -p /pytorch/dist keeps the two paths' output in the same place so downstream
+# COPY --from=pytorch-builder /pytorch/dist/*.whl keeps working either way.
+COPY scripts/torch-package-build-decide.sh /tmp/
+RUN chmod +x /tmp/torch-package-build-decide.sh && \
+    /tmp/torch-package-build-decide.sh pytorch "${PYTORCH_VERSION}" "${ROCM_ARCH}" "${USE_PREBUILT_PYTORCH}" "${ROCM_RELEASE}" > /tmp/pytorch-decision.txt && \
+    cat /tmp/pytorch-decision.txt
 
-WORKDIR /pytorch
-# setup.py does NOT hipify CUDA sources itself -- tools/amd_build/build_amd.py
-# (translates c10/cuda -> c10/hip, aten/src/ATen/cuda -> aten/src/ATen/hip,
-# etc.) has to run as an explicit step first, or CMake fails looking for
-# .hip sources/templates that don't exist yet. PYTORCH_ROCM_ARCH takes the
-# same semicolon-separated list as GPU_TARGETS above.
-RUN python3 tools/amd_build/build_amd.py
-
-# USE_FLASH_ATTENTION/USE_MEM_EFF_ATTENTION default on for ROCm and pull in
-# aotriton, which configures its own isolated venv that doesn't inherit this
-# stage's numpy (--break-system-packages install), failing the subbuild.
-# AudioMuse-AI doesn't need flash attention, so disable it instead of feeding
-# that nested venv its own numpy.
-#
-# USE_DISTRIBUTED defaults on and pulls in USE_NCCL/USE_NVSHMEM, whose symm_mem
-# device-communicator code (nccl_extension.cu, ncclDevComm/NCCLDevCommManager/
-# ncclCoopCta) is NVIDIA-NCCL-only -- RCCL doesn't implement it, so it fails to
-# compile under ROCm at this PyTorch tag. AudioMuse-AI is single-GPU/single-
-# node, doesn't need torch.distributed, so disable the whole subsystem instead
-# of patching upstream's NCCL-only code.
-#
-# MAX_JOBS sizing: same MemAvailable/4GB-per-job "auto" logic as the
-# migraphx-builder stage above -- PyTorch's own C++ TUs are cheaper than
-# LLVM's, but running as many of them as nproc on a RAM-constrained host
-# still risks OOM.
-# Same ccache-mount reasoning as migraphx-builder above; same reason it can't
-# also cache-mount `build` itself -- a cached CMakeCache.txt from a prior
-# attempt with different USE_* flags left a stale/incomplete configure state
-# (ATen/Config.h missing) rather than reconfiguring cleanly.
 RUN --mount=type=cache,target=/root/.ccache,id=pytorch-ccache \
-    ulimit -s unlimited && \
-    jobs="${BUILD_PARALLEL_LEVEL}"; \
-    if [ "$jobs" = "auto" ]; then \
-        jobs=$(awk '/MemAvailable/{printf "%d", $2/1024/1024/4}' /proc/meminfo); \
-        cpu=$(nproc); [ "$jobs" -gt "$cpu" ] && jobs=$cpu; \
-        [ "$jobs" -lt 1 ] && jobs=1; \
-    fi; \
-    echo "PyTorch build: using $jobs parallel jobs"; \
-    env USE_ROCM=1 ROCM_HOME=/opt/rocm "PYTORCH_ROCM_ARCH=${ROCM_ARCH}" \
-        MAX_JOBS=$jobs USE_MKLDNN=0 USE_CCACHE=1 \
-        USE_FLASH_ATTENTION=0 USE_MEM_EFF_ATTENTION=0 \
-        USE_DISTRIBUTED=0 \
-        python3 setup.py bdist_wheel
+    mkdir -p /pytorch/dist && \
+    DECISION=$(cat /tmp/pytorch-decision.txt) && \
+    if echo "$DECISION" | grep -q '^PIP:'; then \
+        REST="${DECISION#PIP:}" && \
+        PKG_SPEC="${REST%%:*}" && \
+        INDEX_URL="${REST#*:}" && \
+        echo "Downloading prebuilt PyTorch: $PKG_SPEC (+ deps) from $INDEX_URL" && \
+        /build-venv/bin/pip download "$PKG_SPEC" \
+            --index-url "$INDEX_URL" -d /pytorch/dist/; \
+    else \
+        REST="${DECISION#SOURCE:}" && \
+        REPO="${REST%%:*}" && \
+        BRANCH="${REST#*:}" && \
+        echo "Building PyTorch from source (repo: $REPO, branch: $BRANCH)" && \
+        git clone --recursive --branch "${BRANCH}" --depth 1 --shallow-submodules \
+            "https://github.com/${REPO}.git" /pytorch-src && \
+        cd /pytorch-src && \
+        python3 tools/amd_build/build_amd.py && \
+        ulimit -s unlimited && \
+        jobs="${BUILD_PARALLEL_LEVEL}"; \
+        if [ "$jobs" = "auto" ]; then \
+            jobs=$(awk '/MemAvailable/{printf "%d", $2/1024/1024/4}' /proc/meminfo); \
+            cpu=$(nproc); [ "$jobs" -gt "$cpu" ] && jobs=$cpu; \
+            [ "$jobs" -lt 1 ] && jobs=1; \
+        fi; \
+        echo "PyTorch build: using $jobs parallel jobs"; \
+        ck_gemm=1; \
+        if echo "|${LEGACY_GCN_ARCHES}|" | grep -q "|${ROCM_ARCH}|"; then \
+            echo "Legacy GCN arch (${ROCM_ARCH}): composable_kernel has no support for it" \
+                 "(same CK_BUFFER_RESOURCE_3RD_DWORD gap as gfx1033's upstream-vs-ROCm-fork" \
+                 "issue, but unfixable here since CK denylists gfx900/gfx906/gfx90c outright)" \
+                 "-- disabling PyTorch's own CK-based bgemm kernels (USE_ROCM_CK_GEMM)."; \
+            ck_gemm=0; \
+        fi; \
+        env USE_ROCM=1 ROCM_HOME=/opt/rocm "PYTORCH_ROCM_ARCH=${ROCM_ARCH}" \
+            MAX_JOBS=$jobs USE_MKLDNN=0 USE_CCACHE=1 \
+            USE_FLASH_ATTENTION=0 USE_MEM_EFF_ATTENTION=0 \
+            USE_DISTRIBUTED=0 USE_ROCM_CK_GEMM=$ck_gemm \
+            python3 setup.py bdist_wheel && \
+        cp dist/*.whl /pytorch/dist/; \
+    fi
+
+FROM ${ROCBLAS_IMAGE} AS torchvision-builder
+
+ARG ROCM_ARCH="gfx900;gfx90c;gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1033;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201"
+ARG PYTORCH_VERSION=v2.13.0
+ARG BUILD_PARALLEL_LEVEL=auto
+ARG USE_PREBUILT_TORCHVISION=1
+ARG ROCM_RELEASE=
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git cmake ninja-build build-essential pkg-config ccache \
+        libjpeg-dev libpng-dev libfreetype6-dev libopenblas0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN uv venv /build-venv --python 3.12 --seed \
+    && uv pip install --python /build-venv/bin/python3 \
+        numpy pyyaml typing_extensions requests setuptools wheel
+ENV PATH=/build-venv/bin:$PATH
+
+# torchvision: try prebuilt per-arch wheel first, fallback to source build from pytorch/vision.
+# Requires pytorch installed for setup.py (source path) -- install the pytorch wheel first.
+# See the pytorch-builder stage above for the PIP:/SOURCE: decision format. The dist dir may
+# also contain a non-.whl sdist (e.g. the `rocm` metapackage, when USE_PREBUILT_PYTORCH=1
+# pulled in TheRock's rocm-sdk-* deps) -- copy the whole dir, not just *.whl, and pass
+# --find-links so pip/uv can resolve that dependency locally instead of hitting PyPI for it.
+COPY --from=pytorch-builder /pytorch/dist/* /tmp/torch/
+COPY scripts/torch-package-build-decide.sh scripts/generate-torch-constraints.sh /tmp/
+
+RUN LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /build-venv/bin/python3 --find-links /tmp/torch /tmp/torch/*.whl && \
+    chmod +x /tmp/torch-package-build-decide.sh /tmp/generate-torch-constraints.sh && \
+    mkdir -p /torchvision/dist && \
+    PYTORCH_RESOLVED=$(basename $(ls /tmp/torch/torch-*.whl | head -1)) && \
+    /tmp/generate-torch-constraints.sh /tmp/torch > /tmp/torch-constraints.txt && \
+    DECISION=$(/tmp/torch-package-build-decide.sh torchvision "${PYTORCH_VERSION}" "${ROCM_ARCH}" "${USE_PREBUILT_TORCHVISION}" "${ROCM_RELEASE}" "${PYTORCH_RESOLVED}") && \
+    if echo "$DECISION" | grep -q '^PIP:'; then \
+        REST="${DECISION#PIP:}" && \
+        PKG_SPEC="${REST%%:*}" && \
+        INDEX_URL="${REST#*:}" && \
+        echo "Downloading prebuilt torchvision: $PKG_SPEC from $INDEX_URL" && \
+        /build-venv/bin/pip download "$PKG_SPEC" --constraint /tmp/torch-constraints.txt \
+            --find-links /tmp/torch --index-url "$INDEX_URL" -d /torchvision/dist/; \
+    else \
+        REST="${DECISION#SOURCE:}" && \
+        REPO="${REST%%:*}" && \
+        BRANCH="${REST#*:}" && \
+        echo "Building torchvision from source (repo: $REPO, branch: $BRANCH)" && \
+        git clone --recursive --branch "${BRANCH}" --depth 1 --shallow-submodules \
+            "https://github.com/${REPO}.git" /torchvision-src && \
+        cd /torchvision-src && \
+        LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH python3 setup.py bdist_wheel && \
+        cp dist/*.whl /torchvision/dist/; \
+    fi
+
+# Build-time ABI check: the PIP path resolves torch and torchvision independently (separate
+# `pip download` calls, not one joint solve), so a version mismatch between them (torchvision's
+# wheel pins an exact matching torch build; if pytorch-builder resolved a different one) would
+# otherwise only surface as a runtime ImportError in whatever downstream app imports torchvision
+# first. Fail the build here instead, where it's obvious which stage/arch is at fault.
+RUN LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /build-venv/bin/python3 \
+        --find-links /tmp/torch --find-links /torchvision/dist /torchvision/dist/*.whl && \
+    LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH /build-venv/bin/python3 -c \
+        "import torch; import torchvision; print('torchvision', torchvision.__version__, 'OK against torch', torch.__version__)"
+
+FROM ${ROCBLAS_IMAGE} AS torchaudio-builder
+
+ARG PYTORCH_VERSION=v2.13.0
+ARG BUILD_PARALLEL_LEVEL=auto
+ARG USE_PREBUILT_TORCHAUDIO=1
+ARG ROCM_RELEASE=
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git cmake ninja-build build-essential pkg-config ccache \
+        libsndfile1-dev libsndfile1 sox libopenblas0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN uv venv /build-venv --python 3.12 --seed \
+    && uv pip install --python /build-venv/bin/python3 \
+        numpy pyyaml typing_extensions requests setuptools wheel
+ENV PATH=/build-venv/bin:$PATH
+
+# torchaudio: non-device-specific (same wheel works for every GPU target), builds once (not
+# per-gfx) -- try prebuilt first same as pytorch/torchvision, source build (ROCm/audio) only
+# when no matching wheel exists.
+# Requires pytorch installed first (torchaudio setup.py imports torch). See torchvision-builder
+# above for why the dist dir is copied whole and --find-links is passed (non-.whl sdist dep).
+COPY --from=pytorch-builder /pytorch/dist/* /tmp/torch/
+COPY scripts/torch-package-build-decide.sh scripts/generate-torch-constraints.sh /tmp/
+
+RUN LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /build-venv/bin/python3 --find-links /tmp/torch /tmp/torch/*.whl && \
+    chmod +x /tmp/torch-package-build-decide.sh /tmp/generate-torch-constraints.sh && \
+    mkdir -p /torchaudio/dist && \
+    PYTORCH_RESOLVED=$(basename $(ls /tmp/torch/torch-*.whl | head -1)) && \
+    /tmp/generate-torch-constraints.sh /tmp/torch > /tmp/torch-constraints.txt && \
+    DECISION=$(/tmp/torch-package-build-decide.sh torchaudio "${PYTORCH_VERSION}" "" "${USE_PREBUILT_TORCHAUDIO}" "${ROCM_RELEASE}" "${PYTORCH_RESOLVED}") && \
+    if echo "$DECISION" | grep -q '^PIP:'; then \
+        REST="${DECISION#PIP:}" && \
+        PKG_SPEC="${REST%%:*}" && \
+        INDEX_URL="${REST#*:}" && \
+        echo "Downloading prebuilt torchaudio: $PKG_SPEC from $INDEX_URL" && \
+        /build-venv/bin/pip download "$PKG_SPEC" --constraint /tmp/torch-constraints.txt \
+            --find-links /tmp/torch --index-url "$INDEX_URL" -d /torchaudio/dist/; \
+    else \
+        REST="${DECISION#SOURCE:}" && \
+        REPO="${REST%%:*}" && \
+        BRANCH="${REST#*:}" && \
+        echo "Building torchaudio from source (repo: $REPO, branch: $BRANCH)" && \
+        git clone --recursive --branch "${BRANCH}" --depth 1 --shallow-submodules \
+            "https://github.com/${REPO}.git" /torchaudio-src && \
+        cd /torchaudio-src && \
+        LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH python3 setup.py bdist_wheel && \
+        cp dist/*.whl /torchaudio/dist/; \
+    fi
+
+# Build-time ABI check, same reasoning as torchvision-builder's: torch and torchaudio are
+# resolved independently, verify they actually load together before shipping.
+RUN LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /build-venv/bin/python3 \
+        --find-links /tmp/torch --find-links /torchaudio/dist /torchaudio/dist/*.whl && \
+    LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH /build-venv/bin/python3 -c \
+        "import torch; import torchaudio; print('torchaudio', torchaudio.__version__, 'OK against torch', torch.__version__)"
 
 # Indirection stages: `COPY --from=$VAR` isn't allowed (BuildKit rejects a
 # variable in --from), so resolve each component-image ARG through a FROM with
@@ -480,6 +678,8 @@ RUN --mount=type=cache,target=/root/.ccache,id=pytorch-ccache \
 # builder stages drop out of the target's graph entirely -- no recompilation.
 FROM ${MIGRAPHX_IMAGE} AS migraphx-export
 FROM ${PYTORCH_IMAGE} AS pytorch-export
+FROM ${TORCHVISION_IMAGE} AS torchvision-export
+FROM ${TORCHAUDIO_IMAGE} AS torchaudio-export
 
 FROM python-base AS ort-builder
 
@@ -551,11 +751,13 @@ COPY --from=migraphx-export /opt/rocm /opt/rocm
 RUN echo "/opt/rocm/lib" > /etc/ld.so.conf.d/rocm.conf && ldconfig
 
 # libprotobuf is a runtime dependency of libonnxruntime_providers_migraphx.so
-# (MIGraphX links against it), and libopenblas of torch's linear-algebra ops
-# -- both were apt-installed in migraphx-builder/pytorch-builder but not
-# carried into this stage's rootfs.
+# (MIGraphX links against it), libopenblas of torch's linear-algebra ops,
+# and torchvision/torchaudio link against various image/audio codecs.
+# All were apt-installed in builder stages but not carried into this stage's rootfs.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libprotobuf-dev libopenblas0 \
+        libjpeg-turbo-progs libpng-dev libfreetype-dev libtiff-dev libwebp-dev \
+        libsndfile1 libflac-dev libvorbis-dev libopus-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # This image's own python3 is 3.14 (native to this base), but the wheels
@@ -571,12 +773,22 @@ ENV VIRTUAL_ENV=/opt/venv
 # call "$VIRTUAL_ENV/bin/pip" directly.
 RUN uv venv $VIRTUAL_ENV --python 3.12 --seed
 
-COPY --from=ort-export /onnxruntime/dist/*.whl /tmp/ort/
-COPY --from=pytorch-export /pytorch/dist/*.whl /tmp/torch/
-RUN uv pip install --python "$VIRTUAL_ENV/bin/python3" --no-cache numpy /tmp/ort/*.whl /tmp/torch/*.whl \
-    && rm -rf /tmp/ort /tmp/torch \
+COPY --from=ort-export /onnxruntime/dist/*.whl /tmp/wheels/
+COPY --from=pytorch-export /pytorch/dist/* /tmp/wheels/
+COPY --from=torchvision-export /torchvision/dist/* /tmp/wheels/
+COPY --from=torchaudio-export /torchaudio/dist/* /tmp/wheels/
+# All four dist dirs land in ONE shared directory (not four separate ones): pytorch,
+# torchvision, and torchaudio's independent `pip download` calls each pull their own copy of
+# shared transitive deps (filelock, jinja2, sympy, etc.) from the same index -- byte-identical
+# content, but if left in separate directories, uv's resolver sees the same package name at two
+# different local file:// paths and errors with "conflicting URLs" instead of just picking one.
+RUN uv pip install --python "$VIRTUAL_ENV/bin/python3" --no-cache --find-links /tmp/wheels \
+        numpy /tmp/wheels/*.whl \
+    && rm -rf /tmp/wheels \
     && "$VIRTUAL_ENV/bin/python3" -c "import onnxruntime as ort; p=ort.get_available_providers(); print('ORT providers:', p); assert 'MIGraphXExecutionProvider' in p" \
     && "$VIRTUAL_ENV/bin/python3" -c "import torch; print('torch', torch.__version__, 'HIP built:', torch.version.hip)" \
+    && "$VIRTUAL_ENV/bin/python3" -c "import torch, torchvision; print('torchvision', torchvision.__version__)" \
+    && "$VIRTUAL_ENV/bin/python3" -c "import torch, torchaudio; print('torchaudio', torchaudio.__version__)" \
     && "$VIRTUAL_ENV/bin/python3" -c "import migraphx; print('migraphx python module OK')"
 
 ENV PATH="$VIRTUAL_ENV/bin:${PATH}"

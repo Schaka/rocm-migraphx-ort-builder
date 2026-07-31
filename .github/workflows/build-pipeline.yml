@@ -27,6 +27,26 @@ on:
         required: false
         type: string
         default: ''
+      pytorch-version:
+        required: false
+        type: string
+        default: ''
+      rocm-release:
+        required: false
+        type: string
+        default: ''
+      base-image:
+        required: false
+        type: string
+        default: ''
+      use-prebuilt:
+        required: false
+        type: boolean
+        default: true
+      ort-version:
+        required: false
+        type: string
+        default: ''
       debug:
         required: false
         type: boolean
@@ -50,6 +70,8 @@ jobs:
       component: rocblas
       target: rocblas-builder
       release-tag: ${{ inputs.release-tag }}
+      rocm-release: ${{ inputs.rocm-release }}
+      base-image: ${{ inputs.base-image }}
       debug: ${{ inputs.debug }}
 
   # On every non-legacy arch the rocblas job above is skipped, which GitHub
@@ -72,6 +94,8 @@ jobs:
       with-rocblas-image: ${{ inputs.arch == 'gfx900' || inputs.arch == 'gfx906' || inputs.arch == 'gfx90c' }}
       migraphx-ref: ${{ inputs.migraphx-ref }}
       release-tag: ${{ inputs.release-tag }}
+      rocm-release: ${{ inputs.rocm-release }}
+      base-image: ${{ inputs.base-image }}
       debug: ${{ inputs.debug }}
 
   pytorch:
@@ -88,6 +112,10 @@ jobs:
       target: pytorch-builder
       with-rocblas-image: ${{ inputs.arch == 'gfx900' || inputs.arch == 'gfx906' || inputs.arch == 'gfx90c' }}
       release-tag: ${{ inputs.release-tag }}
+      base-image: ${{ inputs.base-image }}
+      pytorch-version: ${{ inputs.pytorch-version }}
+      rocm-release: ${{ inputs.rocm-release }}
+      use-prebuilt: ${{ inputs.use-prebuilt }}
       debug: ${{ inputs.debug }}
 
   ort:
@@ -105,6 +133,9 @@ jobs:
       with-migraphx-image: true
       migraphx-ref: ${{ inputs.migraphx-ref }}
       release-tag: ${{ inputs.release-tag }}
+      rocm-release: ${{ inputs.rocm-release }}
+      base-image: ${{ inputs.base-image }}
+      ort-version: ${{ inputs.ort-version }}
       debug: ${{ inputs.debug }}
 
   final:
@@ -124,4 +155,9 @@ jobs:
       with-ort-image: true
       migraphx-ref: ${{ inputs.migraphx-ref }}
       release-tag: ${{ inputs.release-tag }}
+      base-image: ${{ inputs.base-image }}
+      pytorch-version: ${{ inputs.pytorch-version }}
+      rocm-release: ${{ inputs.rocm-release }}
+      use-prebuilt: ${{ inputs.use-prebuilt }}
+      ort-version: ${{ inputs.ort-version }}
       debug: ${{ inputs.debug }}
