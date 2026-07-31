@@ -23,6 +23,10 @@ on:
         required: false
         type: string
         default: develop
+      release-tag:
+        required: false
+        type: string
+        default: ''
       debug:
         required: false
         type: boolean
@@ -45,6 +49,7 @@ jobs:
       arch: ${{ inputs.arch }}
       component: rocblas
       target: rocblas-builder
+      release-tag: ${{ inputs.release-tag }}
       debug: ${{ inputs.debug }}
 
   # On every non-legacy arch the rocblas job above is skipped, which GitHub
@@ -66,6 +71,7 @@ jobs:
       target: migraphx-builder
       with-rocblas-image: ${{ inputs.arch == 'gfx900' || inputs.arch == 'gfx906' || inputs.arch == 'gfx90c' }}
       migraphx-ref: ${{ inputs.migraphx-ref }}
+      release-tag: ${{ inputs.release-tag }}
       debug: ${{ inputs.debug }}
 
   pytorch:
@@ -81,6 +87,7 @@ jobs:
       component: pytorch
       target: pytorch-builder
       with-rocblas-image: ${{ inputs.arch == 'gfx900' || inputs.arch == 'gfx906' || inputs.arch == 'gfx90c' }}
+      release-tag: ${{ inputs.release-tag }}
       debug: ${{ inputs.debug }}
 
   ort:
@@ -97,6 +104,7 @@ jobs:
       target: ort-builder
       with-migraphx-image: true
       migraphx-ref: ${{ inputs.migraphx-ref }}
+      release-tag: ${{ inputs.release-tag }}
       debug: ${{ inputs.debug }}
 
   final:
@@ -115,4 +123,5 @@ jobs:
       with-pytorch-image: true
       with-ort-image: true
       migraphx-ref: ${{ inputs.migraphx-ref }}
+      release-tag: ${{ inputs.release-tag }}
       debug: ${{ inputs.debug }}

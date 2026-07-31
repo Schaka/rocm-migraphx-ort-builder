@@ -1,0 +1,61 @@
+name: Release build
+
+# Triggered by pushing a version tag (e.g. "v7.14.0"), NOT on a schedule --
+# unlike nightly.yml, a release build pins every moving part (MIGraphX ref,
+# and the resulting image tag) to an immutable ROCm line, so there is nothing
+# to gain from rebuilding it unattended. rocBLAS's source ref (ROCM_VERSION),
+# the base image, and ORT_VERSION/PYTORCH_VERSION are already static Dockerfile
+# defaults (see Dockerfile) -- kept in sync with whatever ROCm line this tag
+# targets is a manual bump of the Dockerfile itself, done before tagging.
+#
+# The tag's major.minor (e.g. "7.14" out of "v7.14.0") drives both:
+#   - migraphx-ref: release/rocm-rel-<major.minor>, MIGraphX's own stable
+#     branch for that ROCm line (not develop)
+#   - release-tag: rocm<major.minor>, passed through build-pipeline.yml so
+#     build-component.yml publishes a single immutable "rocm7.14-<arch>"
+#     final tag instead of the develop-tracking :latest-<arch>/:<date>-<arch>
+#     pair. Point downstream consumers at that tag for a stable, reproducible
+#     build.
+#
+# Same per-arch fan-out as nightly.yml, minus gfx803 (different Dockerfile,
+# different ROCm major entirely -- see gfx803/README.md; it stays on its own
+# manual gfx803.yml workflow and isn't part of this tag scheme).
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  set-version:
+    runs-on: ubuntu-latest
+    outputs:
+      migraphx-ref: ${{ steps.parse.outputs.migraphx-ref }}
+      release-tag: ${{ steps.parse.outputs.release-tag }}
+    steps:
+      - id: parse
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          ver="$(echo "$tag" | sed -E 's/^v([0-9]+\.[0-9]+).*/\1/')"
+          if [ "$ver" = "$tag" ]; then
+            echo "Tag '${tag}' doesn't match vMAJOR.MINOR[.PATCH]" >&2
+            exit 1
+          fi
+          echo "migraphx-ref=release/rocm-rel-${ver}" >> "$GITHUB_OUTPUT"
+          echo "release-tag=rocm${ver}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: set-version
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ["gfx900","gfx90c","gfx906","gfx908","gfx90a","gfx942","gfx950","gfx1010","gfx1011","gfx1012","gfx1030","gfx1031","gfx1032","gfx1033","gfx1034","gfx1035","gfx1036","gfx1100","gfx1101","gfx1102","gfx1103","gfx1150","gfx1151","gfx1152","gfx1153","gfx1200","gfx1201"]
+    uses: ./.github/workflows/build-pipeline.yml
+    secrets: inherit
+    with:
+      arch: ${{ matrix.arch }}
+      migraphx-ref: ${{ needs.set-version.outputs.migraphx-ref }}
+      release-tag: ${{ needs.set-version.outputs.release-tag }}

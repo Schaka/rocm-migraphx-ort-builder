@@ -398,7 +398,7 @@ FROM ${ROCBLAS_IMAGE} AS pytorch-builder
 # MIOpen/rocRAND stack already in this base image (or the gfx900/gfx906
 # rebuild from rocblas-builder above, on those two arches).
 ARG ROCM_ARCH="gfx900;gfx90c;gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1033;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201"
-ARG PYTORCH_VERSION=v2.12.0
+ARG PYTORCH_VERSION=v2.13.0
 ARG BUILD_PARALLEL_LEVEL=auto
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -475,7 +475,7 @@ FROM ${PYTORCH_IMAGE} AS pytorch-export
 FROM python-base AS ort-builder
 
 ARG ROCM_ARCH="gfx900;gfx90c;gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1033;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201"
-ARG ORT_VERSION=v1.27.1
+ARG ORT_VERSION=v1.28.0
 
 COPY --from=migraphx-export /opt/rocm /opt/rocm
 

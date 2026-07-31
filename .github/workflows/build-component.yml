@@ -53,6 +53,11 @@ on:
         required: false
         type: string
         default: develop
+      release-tag:
+        description: 'Set for a pinned release build (e.g. "rocm7.14"). Replaces the migraphx-ref-derived tag suffix with this exact string, and (for the final component) publishes a single "<release-tag>-<arch>" tag instead of the usual :latest-<arch>/:<date>-<arch> pair.'
+        required: false
+        type: string
+        default: ''
       debug:
         description: 'Open an SSH debug session (tmate) into the runner for the duration of the build'
         required: false
@@ -137,9 +142,14 @@ jobs:
           # upstream of migraphx and equally independent of its ref, so it's
           # exempt too -- a pinned-ref run reuses the same rocBLAS image.
           ref="${{ inputs.migraphx-ref }}"
+          release_tag="${{ inputs.release-tag }}"
           suffix=""
-          if [ "$ref" != "develop" ] && [ "$component" != "pytorch" ] && [ "$component" != "rocblas" ]; then
-            suffix="-$(echo "$ref" | tr -sc 'A-Za-z0-9' '-' | sed 's/^-*//;s/-*$//')"
+          if [ "$component" != "pytorch" ] && [ "$component" != "rocblas" ]; then
+            if [ -n "$release_tag" ]; then
+              suffix="-${release_tag}"
+            elif [ "$ref" != "develop" ]; then
+              suffix="-$(echo "$ref" | tr -sc 'A-Za-z0-9' '-' | sed 's/^-*//;s/-*$//')"
+            fi
           fi
           tag_arch="${arch}${suffix}"
 
@@ -174,12 +184,20 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           if [ "${{ inputs.final }}" = "true" ]; then
-            {
-              echo "tags<<TAGS_EOF"
-              echo "${self}:latest-${tag_arch}"
-              echo "${self}:${{ steps.date.outputs.date }}-${tag_arch}"
-              echo "TAGS_EOF"
-            } >> "$GITHUB_OUTPUT"
+            if [ -n "$release_tag" ]; then
+              # Release build: one immutable "<release-tag>-<arch>" tag, not the
+              # develop-tracking :latest-<arch>/:<date>-<arch> pair -- those two
+              # are meant to move nightly, a release tag is meant to never change
+              # under the same name again.
+              echo "tags=${self}:${release_tag}-${arch}" >> "$GITHUB_OUTPUT"
+            else
+              {
+                echo "tags<<TAGS_EOF"
+                echo "${self}:latest-${tag_arch}"
+                echo "${self}:${{ steps.date.outputs.date }}-${tag_arch}"
+                echo "TAGS_EOF"
+              } >> "$GITHUB_OUTPUT"
+            fi
           else
             echo "tags=${self}:${tag_arch}" >> "$GITHUB_OUTPUT"
           fi
