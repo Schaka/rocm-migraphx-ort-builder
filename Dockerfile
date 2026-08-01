@@ -573,6 +573,30 @@ RUN --mount=type=cache,target=/root/.ccache,id=pytorch-ccache \
         build_pytorch_from_source "$PLAN_SOURCE_REPO" "$PLAN_SOURCE_BRANCH"; \
     fi
 
+# Alias declared here (not down by migraphx-export/ort-export where the other
+# *-export aliases live) so torchvision-builder/torchaudio-builder below can
+# reference it too. PYTORCH_IMAGE defaults to the local stage name
+# "pytorch-builder" (see the ARG's own declaration near the top of this file),
+# so a plain local `docker build .` still resolves this to that in-tree stage
+# with zero behavior change.
+#
+# torchvision-builder/torchaudio-builder used to COPY --from=pytorch-builder
+# directly -- the LOCAL stage, always rebuilt from scratch, ignoring
+# PYTORCH_IMAGE entirely. That meant CI's "final" job (which always sets
+# PYTORCH_IMAGE to the already-published pytorch component image) redundantly
+# rebuilt pytorch from source/PIP a SECOND time just to feed torchvision/
+# torchaudio -- wasted build time, and worse, no guarantee the two builds
+# agree: torch-package-build-decide.sh's discovery can resolve a different
+# wheel on the second run (different moment, same floating nightly index),
+# producing two non-identical torch wheels under the same version number.
+# uv then refuses to install both ("conflicting URLs for package `torch`")
+# once torchvision's own dist dir (which re-bundles the torch wheel it built
+# against) and pytorch-export's dist land in the same directory below.
+# Aliasing through pytorch-export instead guarantees torchvision/torchaudio
+# build against the EXACT SAME torch artifact the final stage installs -- and
+# skips rebuilding it entirely when PYTORCH_IMAGE points at a prebuilt image.
+FROM ${PYTORCH_IMAGE} AS pytorch-export
+
 FROM ${ROCBLAS_IMAGE} AS torchvision-builder
 
 ARG ROCM_ARCH="gfx900;gfx90c;gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201"
@@ -597,7 +621,8 @@ ENV PATH=/build-venv/bin:$PATH
 # also contain a non-.whl sdist (e.g. the `rocm` metapackage, when USE_PREBUILT_PYTORCH=1
 # pulled in TheRock's rocm-sdk-* deps) -- copy the whole dir, not just *.whl, and pass
 # --find-links so pip/uv can resolve that dependency locally instead of hitting PyPI for it.
-COPY --from=pytorch-builder /pytorch/dist/* /tmp/torch/
+# --from=pytorch-export (not pytorch-builder directly) -- see that alias's own comment above.
+COPY --from=pytorch-export /pytorch/dist/* /tmp/torch/
 COPY scripts/torch-package-build-decide.sh scripts/generate-torch-constraints.sh /tmp/
 
 # --no-deps + the explicit package list: pytorch-builder's devreleases-snapshot fallback (see
@@ -680,7 +705,8 @@ ENV PATH=/build-venv/bin:$PATH
 # above for why the dist dir is copied whole and --find-links is passed (non-.whl sdist dep),
 # and for --no-deps + the explicit package list (pytorch-builder's devreleases-snapshot
 # fallback's declared pins don't match what was actually downloaded).
-COPY --from=pytorch-builder /pytorch/dist/* /tmp/torch/
+# --from=pytorch-export (not pytorch-builder directly) -- see that alias's own comment above.
+COPY --from=pytorch-export /pytorch/dist/* /tmp/torch/
 COPY scripts/torch-package-build-decide.sh scripts/generate-torch-constraints.sh /tmp/
 
 RUN LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /build-venv/bin/python3 --no-deps \
@@ -730,7 +756,8 @@ RUN LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /buil
 # as prebuilt image refs, so these become plain image pulls and the local
 # builder stages drop out of the target's graph entirely -- no recompilation.
 FROM ${MIGRAPHX_IMAGE} AS migraphx-export
-FROM ${PYTORCH_IMAGE} AS pytorch-export
+# pytorch-export declared earlier (right before torchvision-builder) so that
+# stage can also alias through it -- see its own comment there.
 FROM ${TORCHVISION_IMAGE} AS torchvision-export
 FROM ${TORCHAUDIO_IMAGE} AS torchaudio-export
 
@@ -826,11 +853,39 @@ ENV VIRTUAL_ENV=/opt/venv
 # call "$VIRTUAL_ENV/bin/pip" directly.
 RUN uv venv $VIRTUAL_ENV --python 3.12 --seed
 
-COPY --from=ort-export /onnxruntime/dist/*.whl /tmp/wheels/
-COPY --from=pytorch-export /pytorch/dist/* /tmp/wheels/
-COPY --from=torchvision-export /torchvision/dist/* /tmp/wheels/
-COPY --from=torchaudio-export /torchaudio/dist/* /tmp/wheels/
-# All four dist dirs land in ONE shared directory (not four separate ones): pytorch,
+# onnxruntime + migraphx only -- the "classic" /opt/rocm stack's own Python
+# surface. Kept in its own install step (not merged with torch's wheels
+# below) because torch's prebuilt wheel bundles TheRock's pip-packaged ROCm
+# SDK (its own libamd_comgr.so/libLLVM.so under
+# site-packages/_rocm_sdk_core/lib), a second copy of comgr/LLVM independent
+# of this stage's classic /opt/rocm one. Any process that ends up loading
+# both (e.g. ctranslate2 -- built against classic /opt/rocm -- opportunistically
+# does `import torch` in its specs/model_spec module if torch happens to be
+# importable) aborts at startup: LLVM's global CommandLine option registry
+# rejects the second registration of the same option
+# ("CommandLine Error: Option 'spirv-expand-step' registered more than once!").
+# Keeping torch out of $VIRTUAL_ENV entirely means classic-stack consumers
+# never see it importable, so that opportunistic import just ImportErrors
+# harmlessly instead of loading a second comgr/LLVM.
+COPY --from=ort-export /onnxruntime/dist/*.whl /tmp/wheels-ort/
+RUN uv pip install --python "$VIRTUAL_ENV/bin/python3" --no-cache --no-deps --find-links /tmp/wheels-ort \
+        numpy flatbuffers packaging protobuf \
+        /tmp/wheels-ort/*.whl \
+    && rm -rf /tmp/wheels-ort \
+    && "$VIRTUAL_ENV/bin/python3" -c "import onnxruntime as ort; p=ort.get_available_providers(); print('ORT providers:', p); assert 'MIGraphXExecutionProvider' in p" \
+    && "$VIRTUAL_ENV/bin/python3" -c "import migraphx; print('migraphx python module OK')"
+
+# torch/torchvision/torchaudio: deliberately a SEPARATE venv, not merged into
+# $VIRTUAL_ENV above -- see the comment on the onnxruntime install. Not added
+# to PATH either: torch is opt-in via this venv's own interpreter path, never
+# the default `python3` a downstream Dockerfile gets from this image.
+ENV VIRTUAL_ENV_TORCH=/opt/venv-torch
+RUN uv venv $VIRTUAL_ENV_TORCH --python 3.12 --seed
+
+COPY --from=pytorch-export /pytorch/dist/* /tmp/wheels-torch/
+COPY --from=torchvision-export /torchvision/dist/* /tmp/wheels-torch/
+COPY --from=torchaudio-export /torchaudio/dist/* /tmp/wheels-torch/
+# All three dist dirs land in ONE shared directory (not three separate ones): pytorch,
 # torchvision, and torchaudio's independent `pip download` calls each pull their own copy of
 # shared transitive deps (filelock, jinja2, sympy, etc.) from the same index -- byte-identical
 # content, but if left in separate directories, uv's resolver sees the same package name at two
@@ -840,22 +895,20 @@ COPY --from=torchaudio-export /torchaudio/dist/* /tmp/wheels/
 # builder's own installs above: pytorch-builder's devreleases-snapshot fallback can produce
 # wheels whose declared Requires-Dist pins don't match what was actually downloaded, so pip's
 # normal resolver can't be trusted to re-verify them here. The named packages cover every
-# wheel's own ordinary, non-ROCm-pinned runtime deps (torch's + onnxruntime's flatbuffers/
-# packaging/protobuf + torchvision's pillow) -- satisfied instantly from /tmp/wheels when
-# already present, pulled fresh from PyPI otherwise.
-RUN uv pip install --python "$VIRTUAL_ENV/bin/python3" --no-cache --no-deps --find-links /tmp/wheels \
+# wheel's own ordinary, non-ROCm-pinned runtime deps (torch's numpy + torchvision's pillow) --
+# satisfied instantly from /tmp/wheels-torch when already present, pulled fresh from PyPI
+# otherwise.
+RUN uv pip install --python "$VIRTUAL_ENV_TORCH/bin/python3" --no-cache --no-deps --find-links /tmp/wheels-torch \
         numpy filelock typing_extensions sympy networkx jinja2 fsspec mpmath MarkupSafe \
-        setuptools flatbuffers packaging protobuf pillow \
-        /tmp/wheels/*.whl \
-    && if ls /tmp/wheels/*.tar.gz >/dev/null 2>&1; then \
-        uv pip install --python "$VIRTUAL_ENV/bin/python3" --no-cache --no-deps \
-            --no-build-isolation --find-links /tmp/wheels /tmp/wheels/*.tar.gz; \
+        setuptools pillow \
+        /tmp/wheels-torch/*.whl \
+    && if ls /tmp/wheels-torch/*.tar.gz >/dev/null 2>&1; then \
+        uv pip install --python "$VIRTUAL_ENV_TORCH/bin/python3" --no-cache --no-deps \
+            --no-build-isolation --find-links /tmp/wheels-torch /tmp/wheels-torch/*.tar.gz; \
     fi \
-    && rm -rf /tmp/wheels \
-    && "$VIRTUAL_ENV/bin/python3" -c "import onnxruntime as ort; p=ort.get_available_providers(); print('ORT providers:', p); assert 'MIGraphXExecutionProvider' in p" \
-    && "$VIRTUAL_ENV/bin/python3" -c "import torch; print('torch', torch.__version__, 'HIP built:', torch.version.hip)" \
-    && "$VIRTUAL_ENV/bin/python3" -c "import torch, torchvision; print('torchvision', torchvision.__version__)" \
-    && "$VIRTUAL_ENV/bin/python3" -c "import torch, torchaudio; print('torchaudio', torchaudio.__version__)" \
-    && "$VIRTUAL_ENV/bin/python3" -c "import migraphx; print('migraphx python module OK')"
+    && rm -rf /tmp/wheels-torch \
+    && "$VIRTUAL_ENV_TORCH/bin/python3" -c "import torch; print('torch', torch.__version__, 'HIP built:', torch.version.hip)" \
+    && "$VIRTUAL_ENV_TORCH/bin/python3" -c "import torch, torchvision; print('torchvision', torchvision.__version__)" \
+    && "$VIRTUAL_ENV_TORCH/bin/python3" -c "import torch, torchaudio; print('torchaudio', torchaudio.__version__)"
 
 ENV PATH="$VIRTUAL_ENV/bin:${PATH}"

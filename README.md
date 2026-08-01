@@ -142,9 +142,49 @@ rationale, versions, packages, caveats -- lives in
 ## Using this image
 
 Drop-in `BASE_IMAGE` for anything currently pinned to a `rocm/onnxruntime:*`
-tag: onnxruntime (built `--use_rocm --use_migraphx`) and torch both live in a
-venv at `/opt/venv` (on `PATH`), and `/opt/rocm` has the from-source MIGraphX
-plus its ROCm runtime deps.
+tag: onnxruntime (built `--use_rocm --use_migraphx`) lives in a venv at
+`/opt/venv` (on `PATH`), and `/opt/rocm` has the from-source MIGraphX plus its
+ROCm runtime deps.
+
+**torch/torchvision/torchaudio live in a *separate* venv,
+`/opt/venv-torch` (exported as `$VIRTUAL_ENV_TORCH`, deliberately *not* on
+`PATH`) -- `/opt/venv`'s `python3` cannot `import torch`.** This is
+intentional, not an oversight: AMD's prebuilt torch wheel (the
+`USE_PREBUILT_PYTORCH=1` default) bundles TheRock's own pip-packaged ROCm SDK
+(`rocm_sdk`/`_rocm_sdk_core`/`_rocm_sdk_device_<arch>`), a second, independent
+copy of `libamd_comgr`/`libLLVM` alongside this image's classic `/opt/rocm`
+copy. If both ever load into the same process -- which happens automatically
+the moment anything imports torch in a process that also touches the classic
+stack, e.g. `ctranslate2` opportunistically does `import torch` internally if
+it's importable at all -- the process aborts at startup: LLVM's global
+`CommandLine` option registry rejects the duplicate registration
+(`CommandLine Error: Option 'spirv-expand-step' registered more than once!`).
+There is no supported way to install the prebuilt wheel `--no-deps` and reuse
+the classic libs instead: `torch/_rocm_init.py` does a bare, unguarded
+`import rocm_sdk` at `import torch` time, so the wheel simply refuses to
+import at all without its `rocm_sdk` siblings present -- confirmed by testing
+it directly. Exposing `/opt/venv-torch`'s `site-packages` to the classic venv
+(via `PYTHONPATH` or similar) reintroduces the exact same crash, since that
+just recreates "both trees reachable from one process" by another name --
+`PATH` alone is harmless (it only selects which `python3` binary runs, not
+what an already-running interpreter can import) but two venvs both providing
+a binary named `python3` invites a different, quieter bug: whichever
+directory wins on `PATH` silently decides what any bare `python3`/`pip` call
+actually runs.
+
+The split applies uniformly regardless of which tier
+`USE_PREBUILT_PYTORCH`/`torch-package-build-decide.sh` actually picked for a
+given build -- **including the from-source fallback** (no prebuilt wheel
+matched, or `USE_PREBUILT_PYTORCH=0`): that torch links directly against
+`/opt/rocm` and doesn't pull in `rocm_sdk` at all, but it still lands in
+`/opt/venv-torch`, never `/opt/venv`. Don't assume "torch was built from
+source, so it must be in the main venv" -- it never is, for either tier.
+
+To use torch:
+
+```dockerfile
+RUN "$VIRTUAL_ENV_TORCH/bin/python3" -c "import torch; print(torch.__version__)"
+```
 
 The combined image (`rocm-migraphx-ort-torch-builder`) is tagged per-arch:
 `:latest-<arch>` (e.g. `:latest-gfx1201`) and `:<YYYYMMDD>-<arch>` for nightly
