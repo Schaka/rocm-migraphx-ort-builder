@@ -161,6 +161,7 @@ jobs:
             {
               echo "tags<<TAGS_EOF"
               echo "${self}:latest-gfx803"
+              echo "${self}:rocm6.4.4-gfx803"
               echo "${self}:${{ steps.date.outputs.date }}-gfx803"
               echo "TAGS_EOF"
             } >> "$GITHUB_OUTPUT"
