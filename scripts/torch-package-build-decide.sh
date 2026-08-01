@@ -15,6 +15,14 @@ set -eux
 # match regardless of ROCm major -- nightly is meant to float to whatever AMD actually
 # publishes newest. See README.md for why no major-version preference is applied here.
 #
+# pytorch specifically, in release mode (ROCM_RELEASE set), can also output:
+#   "SNAPSHOT:<arch>:<pytorch_ver_num>:<rocm_release>:<source_repo>:<source_branch>"
+# meaning: no stable release wheel exists on repo.amd.com for this exact pin. The caller
+# should run scripts/rocm-devrelease-snapshot.py with the bundled arch/pytorch_ver_num/
+# rocm_release (that script resolves a devreleases nightly snapshot where the whole
+# dependency closure is mutually consistent -- see its own header for why); if THAT also
+# comes up empty, fall back to a source build using the bundled source_repo/source_branch.
+#
 # For source builds: outputs "SOURCE:<repo>:<branch>"
 #
 # torchvision/torchaudio must match whatever pytorch itself actually resolved to, not be
@@ -60,6 +68,15 @@ PYTHON_VERSION="cp312"
 PLATFORM="linux_x86_64"
 
 NIGHTLY_INDEX="https://rocm.nightlies.amd.com/whl-multi-arch/"
+# repo.amd.com is AMD's actual stable-release pip index -- confirmed via
+# https://github.com/ROCm/TheRock/issues/6931, which names it directly as "the ROCm 7.14
+# release pip index". rocm.devreleases.amd.com (below) is NOT this: every build hosted there
+# is tagged "rcN", ".dev0+<git-hash>", or "aYYYYMMDD" (nightly) -- confirmed empirically that
+# a devreleases build's OWN dependency metadata always declares abstract pins like
+# "rocm-sdk-device-<arch>==7.14.0" that devreleases itself never actually has a matching
+# build for, regardless of which day's build you pick. Only repo.amd.com carries wheels
+# where the version string an install actually asked for is the version string that exists.
+STABLE_RELEASE_INDEX="https://repo.amd.com/rocm/whl-multi-arch/"
 RELEASE_INDEX="https://rocm.devreleases.amd.com/whl-multi-arch/"
 
 log() {
@@ -165,19 +182,21 @@ pytorch_find_nightly_version() {
     extract_version "$(echo "$matches" | tail -1)" "$name_prefix"
 }
 
-pytorch_find_release_version() {
+# Exact match only -- no trailing wildcard, no rc/dev tolerance. repo.amd.com only ever hosts
+# the literal "<pytorch_ver>+rocm<release>.0" build (see STABLE_RELEASE_INDEX's own comment
+# above), so a match here is a real, fully-resolvable release with no substitution needed.
+pytorch_find_stable_release_version() {
     local arch=$1
     local pytorch_version=$2
     local rocm_release=$3
     local pytorch_ver_num=${pytorch_version#v}
-    local base_url="${RELEASE_INDEX}amd-torch-device-${arch}/"
+    local base_url="${STABLE_RELEASE_INDEX}amd-torch-device-${arch}/"
     local name_prefix="amd_torch_device_${arch}"
 
-    log "Checking release pytorch versions: $arch pytorch=$pytorch_ver_num rocm=$rocm_release"
+    log "Checking stable release (repo.amd.com) pytorch versions: $arch pytorch=$pytorch_ver_num rocm=$rocm_release"
 
     local matches
-    matches=$(list_wheel_versions "$base_url" "${name_prefix}-${pytorch_ver_num}%2Brocm${rocm_release}\.0[^\"]*")
-    matches=$(echo "$matches" | grep -v '+dev' || true)
+    matches=$(list_wheel_versions "$base_url" "${name_prefix}-${pytorch_ver_num}%2Brocm${rocm_release}\.0")
     if [ -z "$matches" ]; then
         return 1
     fi
@@ -250,24 +269,52 @@ torchaudio_find_latest_version() {
 
 case "$PACKAGE" in
     pytorch)
+        # Always bundles every tier's info in one line, whether or not the upfront listing
+        # checks below found anything -- the caller must retry the NEXT tier if a tier's own
+        # actual download fails for any reason THIS script didn't anticipate (network blip, a
+        # transient index outage, a dependency gap this listing-only check can't see), not just
+        # when nothing was listed at all. A build must never simply die because of that; SOURCE
+        # is always present as a guaranteed-workable last resort.
+        #
+        # PYTORCH_PLAN:<pip_pkg_spec_or_EMPTY>|<pip_index_or_EMPTY>|<try_snapshot 0|1>|<arch>|<pytorch_ver_num>|<rocm_release>|<source_repo>|<source_branch>
+        # ("|"-delimited, not ":" -- the index URL field itself contains colons)
         PKG_NAME="amd-torch-device-${ROCM_ARCH}"
+        ROCM_PYTORCH_BRANCH=$(determine_rocm_pytorch_branch "$PYTORCH_VERSION") || exit 1
+        PIP_SPEC=""
+        PIP_INDEX=""
+        TRY_SNAPSHOT=0
+
         if [ "$USE_PREBUILT" = "1" ]; then
             if [ -z "$ROCM_RELEASE" ]; then
                 PYTORCH_VER_FILTER=""
                 if [ -n "$PYTORCH_VERSION" ] && [ "$PYTORCH_VERSION" != "develop" ]; then
                     PYTORCH_VER_FILTER=${PYTORCH_VERSION#v}
                 fi
-                VERSION=$(pytorch_find_nightly_version "$ROCM_ARCH" "$PYTORCH_VER_FILTER") && \
-                    { echo "PIP:${PKG_NAME}==${VERSION}:${NIGHTLY_INDEX}"; exit 0; }
+                if VERSION=$(pytorch_find_nightly_version "$ROCM_ARCH" "$PYTORCH_VER_FILTER"); then
+                    PIP_SPEC="${PKG_NAME}==${VERSION}"
+                    PIP_INDEX="$NIGHTLY_INDEX"
+                else
+                    log "No nightly wheel listed -- caller falls straight to source build"
+                fi
             else
-                VERSION=$(pytorch_find_release_version "$ROCM_ARCH" "$PYTORCH_VERSION" "$ROCM_RELEASE") && \
-                    { echo "PIP:${PKG_NAME}==${VERSION}:${RELEASE_INDEX}"; exit 0; }
+                # Tier 1: repo.amd.com's real, stable release -- a match here is guaranteed
+                # fully resolvable, no further checking needed.
+                if VERSION=$(pytorch_find_stable_release_version "$ROCM_ARCH" "$PYTORCH_VERSION" "$ROCM_RELEASE"); then
+                    PIP_SPEC="${PKG_NAME}==${VERSION}"
+                    PIP_INDEX="$STABLE_RELEASE_INDEX"
+                else
+                    log "No stable release wheel listed on repo.amd.com for pytorch=${PYTORCH_VERSION#v} rocm=${ROCM_RELEASE}"
+                fi
+                # Tier 2 (rocm-devrelease-snapshot.py -- picks ONE devreleases nightly date
+                # where the whole dependency closure resolves, see its own header) is only
+                # meaningful in release mode; always offered as the caller's next fallback,
+                # regardless of whether tier 1 was listed above, since the ACTUAL tier 1
+                # download can still fail for a reason this listing check didn't catch.
+                TRY_SNAPSHOT=1
             fi
-            log "Prebuilt wheel not available, falling back to source build"
         fi
 
-        ROCM_PYTORCH_BRANCH=$(determine_rocm_pytorch_branch "$PYTORCH_VERSION") || exit 1
-        echo "SOURCE:ROCm/pytorch:${ROCM_PYTORCH_BRANCH}"
+        echo "PYTORCH_PLAN:${PIP_SPEC}|${PIP_INDEX}|${TRY_SNAPSHOT}|${ROCM_ARCH}|${PYTORCH_VERSION#v}|${ROCM_RELEASE}|ROCm/pytorch|${ROCM_PYTORCH_BRANCH}"
         ;;
 
     torchvision)
