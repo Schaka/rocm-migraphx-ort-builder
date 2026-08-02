@@ -404,6 +404,25 @@ RUN if echo "|${LEGACY_GCN_ARCHES}|" | grep -q "|${ROCM_ARCH}|"; then \
 # rbuild shells out to a bare `cget` (relies on PATH, not sys.executable), so
 # the venv's bin dir must be on PATH, not just invoked via absolute path.
 #
+# MIGraphX's own cmake/PythonModules.cmake ignores -DPython3_EXECUTABLE below
+# entirely for its python-module target(s): its find_python(version) macro
+# instead does a bare `find_program(python<version>-config)` PATH search, once
+# per entry in a hardcoded 3.6-3.14 list, and silently skips any version whose
+# `-config` script isn't found -- no error, just that version missing from the
+# PYTHON_VERSIONS it then builds modules for. /rbuild-venv (a venv) never
+# carries a python3.12-config script -- that's an artifact of the underlying
+# real interpreter install, not something venvs create -- so without this,
+# find_python(3.12) silently fails while find_python(3.14) silently succeeds
+# against this base image's own native python3.14-config on PATH, and the
+# only migraphx.so that ends up built is cpython-314-tagged: unimportable
+# from every 3.12 venv downstream (final stage's $VIRTUAL_ENV, AudioMuse-AI's
+# own numpy/onnx pin compatibility requirement -- see that stage's comment).
+# `uv python find 3.12`'s own bin dir is where the real python3.12-config
+# actually lives; PYTHON_DISABLE_VERSIONS=3.14 additionally makes the outcome
+# deterministic regardless of what else this base image's python3-config
+# search might turn up, rather than relying on 3.12 merely winning some
+# discovery-order race against 3.14.
+#
 # rocMLIR's LLVM build: each -O3 clang job doing IPO/codegen on LLVM's own
 # sources needs several GB RSS. Default ninja parallelism (= nproc) can
 # exceed available RAM on the build host, which surfaces as clang segfaulting
@@ -441,19 +460,30 @@ RUN --mount=type=cache,target=/root/.ccache,id=migraphx-ccache \
     if echo "|${LEGACY_GCN_ARCHES}|" | grep -q "|${ROCM_ARCH}|"; then \
         extra_cmake_args="-DMIGRAPHX_USE_HIPBLASLT=Off -DMIGRAPHX_USE_COMPOSABLEKERNEL=Off"; \
     fi; \
+    py312_bin="$(dirname "$(uv python find 3.12)")"; \
     CMAKE_BUILD_PARALLEL_LEVEL=$jobs \
-    PATH=/rbuild-venv/bin:$PATH /rbuild-venv/bin/rbuild build -d /migraphx-deps -B build -G Ninja \
+    PATH="${py312_bin}:/rbuild-venv/bin:$PATH" /rbuild-venv/bin/rbuild build -d /migraphx-deps -B build -G Ninja \
         --cxx=/opt/rocm/llvm/bin/clang++ --cc=/opt/rocm/llvm/bin/clang \
         "-DGPU_TARGETS=${ROCM_ARCH}" \
         -DCMAKE_INSTALL_PREFIX=/opt/rocm \
         -DCMAKE_BUILD_TYPE=Release \
         -DMIGRAPHX_ENABLE_PYTHON=On \
         -DPython3_EXECUTABLE=/rbuild-venv/bin/python3 \
+        -DPYTHON_DISABLE_VERSIONS=3.14 \
         -DBUILD_TESTING=Off \
         -DCMAKE_C_COMPILER_LAUNCHER=ccache \
         -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
         ${extra_cmake_args} \
         -T install
+
+# Confirms the python-version fix above actually took: fails the build here,
+# loudly, rather than shipping a migraphx.so downstream consumers' 3.12 venvs
+# can't import (silently, until someone's `import migraphx` breaks).
+RUN if ! find /opt/rocm -iname "migraphx.cpython-312-*.so" | grep -q .; then \
+        echo "FATAL: no migraphx.cpython-312-*.so under /opt/rocm -- python module built for the wrong interpreter (see the python3.12-config comment above)." >&2; \
+        find /opt/rocm -iname "migraphx.cpython-*.so" >&2; \
+        exit 1; \
+    fi
 
 # Stamp the built ref + resolved commit into the image so downstream
 # consumers (e.g. AudioMuse-AI's entrypoint) can detect a MIGraphX change
@@ -875,10 +905,10 @@ RUN uv pip install --python "$VIRTUAL_ENV/bin/python3" --no-cache --no-deps --fi
     && "$VIRTUAL_ENV/bin/python3" -c "import onnxruntime as ort; p=ort.get_available_providers(); print('ORT providers:', p); assert 'MIGraphXExecutionProvider' in p" \
     && "$VIRTUAL_ENV/bin/python3" -c "import migraphx; print('migraphx python module OK')"
 
-# torch/torchvision/torchaudio: deliberately a SEPARATE venv, not merged into
-# $VIRTUAL_ENV above -- see the comment on the onnxruntime install. Not added
-# to PATH either: torch is opt-in via this venv's own interpreter path, never
-# the default `python3` a downstream Dockerfile gets from this image.
+# torch/torchvision/torchaudio always get their own venv -- see the comment on
+# the onnxruntime install above for why. Not added to PATH: torch is opt-in via
+# this venv's own interpreter path, never the default `python3` a downstream
+# Dockerfile gets from this image.
 ENV VIRTUAL_ENV_TORCH=/opt/venv-torch
 RUN uv venv $VIRTUAL_ENV_TORCH --python 3.12 --seed
 
@@ -898,6 +928,14 @@ COPY --from=torchaudio-export /torchaudio/dist/* /tmp/wheels-torch/
 # wheel's own ordinary, non-ROCm-pinned runtime deps (torch's numpy + torchvision's pillow) --
 # satisfied instantly from /tmp/wheels-torch when already present, pulled fresh from PyPI
 # otherwise.
+#
+# rocm_sdk_core's presence in the collected wheels is the tell for which tier actually fired:
+# only the PIP tier pulls in TheRock's rocm_sdk_* packages (the second comgr/LLVM copy this
+# split exists to keep out of $VIRTUAL_ENV -- see the onnxruntime install's comment). The SOURCE
+# fallback links directly against this stage's own classic /opt/rocm, no rocm_sdk involved, so
+# it carries none of that risk -- safe to ALSO install into $VIRTUAL_ENV, restoring the
+# zero-friction "torch just works from the default python3" behavior for whichever nightly runs
+# happen to fall back to it, without reintroducing the crash on runs that resolve the PIP wheel.
 RUN uv pip install --python "$VIRTUAL_ENV_TORCH/bin/python3" --no-cache --no-deps --find-links /tmp/wheels-torch \
         numpy filelock typing_extensions sympy networkx jinja2 fsspec mpmath MarkupSafe \
         setuptools pillow \
@@ -906,9 +944,24 @@ RUN uv pip install --python "$VIRTUAL_ENV_TORCH/bin/python3" --no-cache --no-dep
         uv pip install --python "$VIRTUAL_ENV_TORCH/bin/python3" --no-cache --no-deps \
             --no-build-isolation --find-links /tmp/wheels-torch /tmp/wheels-torch/*.tar.gz; \
     fi \
-    && rm -rf /tmp/wheels-torch \
     && "$VIRTUAL_ENV_TORCH/bin/python3" -c "import torch; print('torch', torch.__version__, 'HIP built:', torch.version.hip)" \
     && "$VIRTUAL_ENV_TORCH/bin/python3" -c "import torch, torchvision; print('torchvision', torchvision.__version__)" \
-    && "$VIRTUAL_ENV_TORCH/bin/python3" -c "import torch, torchaudio; print('torchaudio', torchaudio.__version__)"
+    && "$VIRTUAL_ENV_TORCH/bin/python3" -c "import torch, torchaudio; print('torchaudio', torchaudio.__version__)" \
+    && if ls /tmp/wheels-torch/rocm_sdk_core-*.whl >/dev/null 2>&1; then \
+        echo "PIP-tier torch (rocm_sdk_core present) -- staying isolated to $VIRTUAL_ENV_TORCH"; \
+    else \
+        echo "SOURCE-tier torch (no rocm_sdk_core) -- also merging into $VIRTUAL_ENV"; \
+        uv pip install --python "$VIRTUAL_ENV/bin/python3" --no-cache --no-deps --find-links /tmp/wheels-torch \
+            numpy filelock typing_extensions sympy networkx jinja2 fsspec mpmath MarkupSafe \
+            setuptools pillow \
+            /tmp/wheels-torch/*.whl \
+        && if ls /tmp/wheels-torch/*.tar.gz >/dev/null 2>&1; then \
+            uv pip install --python "$VIRTUAL_ENV/bin/python3" --no-cache --no-deps \
+                --no-build-isolation --find-links /tmp/wheels-torch /tmp/wheels-torch/*.tar.gz; \
+        fi \
+        && "$VIRTUAL_ENV/bin/python3" -c "import torch; print('torch', torch.__version__, 'HIP built:', torch.version.hip, '(merged into main venv)')" \
+        && "$VIRTUAL_ENV/bin/python3" -c "import onnxruntime as ort; p=ort.get_available_providers(); assert 'MIGraphXExecutionProvider' in p, 'MIGraphX EP lost after merging torch into main venv'; print('MIGraphX EP intact after merge:', p)"; \
+    fi \
+    && rm -rf /tmp/wheels-torch
 
 ENV PATH="$VIRTUAL_ENV/bin:${PATH}"

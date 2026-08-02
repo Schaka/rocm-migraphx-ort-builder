@@ -92,7 +92,7 @@ determine_rocm_pytorch_branch() {
         v2.12.0)  base_branch="release/2.12" ;;
         v2.11.0)  base_branch="release/2.11" ;;
         v2.10.0)  base_branch="release/2.10" ;;
-        develop)  base_branch="develop" ;;
+        ""|develop) base_branch="develop" ;;
         *)        log "Unknown PyTorch version: $pytorch_version"; return 1 ;;
     esac
 
