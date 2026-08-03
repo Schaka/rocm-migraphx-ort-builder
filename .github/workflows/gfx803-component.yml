@@ -101,8 +101,8 @@ jobs:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
-          tool-cache: false
-          docker-images: false
+          tool-cache: true
+          docker-images: true
           swap-storage: false
           android: true
           dotnet: true
@@ -187,9 +187,21 @@ jobs:
 
           echo "cache-ref=${self}:cache-gfx803" >> "$GITHUB_OUTPUT"
 
+          # final's cache is never consumed downstream (nothing builds FROM the
+          # final image), so mode=max there just re-exports every inherited
+          # layer as a cache blob for no benefit -- pure disk pressure on the
+          # runner during the export step, which is exactly where these builds
+          # have been running out of space. mode=min only exports the layers
+          # unique to this build.
+          if [ "${{ inputs.final }}" = "true" ]; then
+            echo "cache-mode=min" >> "$GITHUB_OUTPUT"
+          else
+            echo "cache-mode=max" >> "$GITHUB_OUTPUT"
+          fi
+
       # no-cache bypasses cache-from entirely rather than just skipping cache-to,
       # so a bad/stale layer already sitting under cache-ref can't be reused --
-      # this run still repopulates cache-ref (mode=max) with a fresh result.
+      # this run still repopulates cache-ref with a fresh result.
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
@@ -201,4 +213,4 @@ jobs:
           build-args: ${{ steps.meta.outputs.build-args }}
           no-cache: ${{ inputs.no-cache }}
           cache-from: ${{ inputs.no-cache && '' || format('type=registry,ref={0}', steps.meta.outputs.cache-ref) }}
-          cache-to: type=registry,ref=${{ steps.meta.outputs.cache-ref }},mode=max
+          cache-to: type=registry,ref=${{ steps.meta.outputs.cache-ref }},mode=${{ steps.meta.outputs.cache-mode }}

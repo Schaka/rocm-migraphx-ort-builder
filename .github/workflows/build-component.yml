@@ -118,8 +118,8 @@ jobs:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
-          tool-cache: false
-          docker-images: false
+          tool-cache: true
+          docker-images: true
           swap-storage: false
           android: true
           dotnet: true
@@ -272,6 +272,18 @@ jobs:
 
           echo "cache-ref=${self}:cache-${tag_arch}" >> "$GITHUB_OUTPUT"
 
+          # final's cache is never consumed downstream (nothing builds FROM the
+          # final image), so mode=max there just re-exports every inherited
+          # layer as a cache blob for no benefit -- pure disk pressure on the
+          # runner during the export step, which is exactly where these builds
+          # have been running out of space. mode=min only exports the layers
+          # unique to this build.
+          if [ "${{ inputs.final }}" = "true" ]; then
+            echo "cache-mode=min" >> "$GITHUB_OUTPUT"
+          else
+            echo "cache-mode=max" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
@@ -281,4 +293,4 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           build-args: ${{ steps.meta.outputs.build-args }}
           cache-from: type=registry,ref=${{ steps.meta.outputs.cache-ref }}
-          cache-to: type=registry,ref=${{ steps.meta.outputs.cache-ref }},mode=max
+          cache-to: type=registry,ref=${{ steps.meta.outputs.cache-ref }},mode=${{ steps.meta.outputs.cache-mode }}
