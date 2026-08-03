@@ -40,22 +40,28 @@ jobs:
     outputs:
       base-image: ${{ steps.meta.outputs.base-image }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - id: date
+      - name: Compute build date
+        id: date
         run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
-      - id: meta
+      - name: Assemble tags and cache ref
+        id: meta
         run: |
           owner="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
           echo "base-image=${owner}/rocm-builder:latest" >> "$GITHUB_OUTPUT"
           echo "dated-image=${owner}/rocm-builder:${{ steps.date.outputs.date }}" >> "$GITHUB_OUTPUT"
           echo "cache-ref=${owner}/rocm-builder:cache" >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@v6
+      - name: Build and push rocm-builder base image
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
@@ -73,7 +79,8 @@ jobs:
     outputs:
       arches: ${{ steps.set.outputs.arches }}
     steps:
-      - id: set
+      - name: Resolve arch matrix
+        id: set
         run: |
           # gfx803 shares this pipeline's packages but not its Dockerfile: it is
           # built from gfx803/Dockerfile.gfx803 on a ROCm 6.4.x base by

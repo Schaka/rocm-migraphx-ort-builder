@@ -82,9 +82,11 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - if: inputs.debug
+      - name: Debug session (tmate)
+        if: inputs.debug
         uses: mxschmitt/action-tmate@v3
         with:
           detached: true
@@ -96,21 +98,34 @@ jobs:
       # for a single architecture (which is why the Dockerfile passes
       # --cleanup). swap-storage: false keeps the runner's swap as a
       # memory-pressure safety net for the compile stages.
-      - uses: jlumbroso/free-disk-space@v1.3.1
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
         with:
           tool-cache: false
           docker-images: false
           swap-storage: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
 
-      - uses: docker/setup-buildx-action@v3
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 16
 
-      - uses: docker/login-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - id: date
+      - name: Compute build date
+        id: date
         run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
       # Same packages the main pipeline publishes to, with gfx803 as just
@@ -118,7 +133,8 @@ jobs:
       # Dockerfile.gfx803 on a ROCm 6.4.4 base -- the tag doesn't say so; see
       # gfx803/README.md. Downstream consumers want the final one; the rest are
       # build plumbing.
-      - id: meta
+      - name: Assemble tags, build-args and cache ref
+        id: meta
         run: |
           owner="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
           pkg() {
@@ -174,7 +190,8 @@ jobs:
       # no-cache bypasses cache-from entirely rather than just skipping cache-to,
       # so a bad/stale layer already sitting under cache-ref can't be reused --
       # this run still repopulates cache-ref (mode=max) with a fresh result.
-      - uses: docker/build-push-action@v6
+      - name: Build and push image
+        uses: docker/build-push-action@v6
         with:
           context: gfx803
           file: gfx803/Dockerfile.gfx803

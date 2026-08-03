@@ -67,7 +67,8 @@ jobs:
       base-image: ${{ steps.parse.outputs.base-image }}
       rocm-release: ${{ steps.parse.outputs.rocm-release }}
     steps:
-      - id: parse
+      - name: Parse ROCm version into release tag and refs
+        id: parse
         run: |
           ver="${{ inputs.rocm_version }}"
           major_minor="$(echo "$ver" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')"
@@ -89,7 +90,8 @@ jobs:
     outputs:
       arches: ${{ steps.set.outputs.arches }}
     steps:
-      - id: set
+      - name: Resolve arch matrix
+        id: set
         run: |
           if [ "${{ inputs.arch }}" = "gfx803" ]; then
             echo "gfx803 is not built by this workflow -- run 'Build gfx803 (Polaris)' instead." >&2

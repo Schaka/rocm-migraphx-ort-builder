@@ -97,9 +97,11 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - if: inputs.debug
+      - name: Debug session (tmate)
+        if: inputs.debug
         uses: mxschmitt/action-tmate@v3
         with:
           detached: true
@@ -113,21 +115,34 @@ jobs:
       # of kernel binaries. swap-storage: false leaves the runner's swap in
       # place (the action removes it by default) as a memory-pressure safety net
       # for the compile stages.
-      - uses: jlumbroso/free-disk-space@v1.3.1
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
         with:
           tool-cache: false
           docker-images: false
           swap-storage: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
 
-      - uses: docker/setup-buildx-action@v3
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 16
 
-      - uses: docker/login-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - id: date
+      - name: Compute build date
+        id: date
         run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
       # Assemble build-args, tags and the cache ref here (not inline in the
@@ -140,7 +155,8 @@ jobs:
       # pkg() maps a component name to its full package ref; a build needs it
       # both for its own push target (self) and for the sibling images it COPYs
       # from, so it's a function, not a single var.
-      - id: meta
+      - name: Assemble tags, build-args and cache ref
+        id: meta
         run: |
           owner="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
           pkg() {
@@ -256,7 +272,8 @@ jobs:
 
           echo "cache-ref=${self}:cache-${tag_arch}" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/build-push-action@v6
+      - name: Build and push image
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
