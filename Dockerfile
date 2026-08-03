@@ -474,7 +474,20 @@ RUN --mount=type=cache,target=/root/.ccache,id=migraphx-ccache \
         -DCMAKE_C_COMPILER_LAUNCHER=ccache \
         -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
         ${extra_cmake_args} \
-        -T install
+        -T install; \
+    # Stamp the built ref + resolved commit into the image so downstream
+    # consumers (e.g. AudioMuse-AI's entrypoint) can detect a MIGraphX change
+    # across BASE_IMAGE bumps and invalidate their compiled-model cache instead
+    # of silently recompiling against a stale cache forever. Captured here
+    # (not a later RUN) so it can run before /migraphx-src is removed below.
+    echo "${MIGRAPHX_REF} $(git -C /migraphx-src rev-parse HEAD)" > /opt/rocm/migraphx-version.txt; \
+    # rbuild's dependency tree (a full rocMLIR/LLVM build, easily tens of GB)
+    # and the MIGraphX source/build dir are both fully installed into /opt/rocm
+    # by now -- rm'ing them inside this same RUN (rather than a later one)
+    # keeps them out of this layer's diff entirely instead of just hiding them
+    # behind a whiteout, which is what was actually filling the runner's disk
+    # during the final stage's image export.
+    rm -rf /migraphx-src /migraphx-deps
 
 # Confirms the python-version fix above actually took: fails the build here,
 # loudly, rather than shipping a migraphx.so downstream consumers' 3.12 venvs
@@ -484,12 +497,6 @@ RUN if ! find /opt/rocm -iname "migraphx.cpython-312-*.so" | grep -q .; then \
         find /opt/rocm -iname "migraphx.cpython-*.so" >&2; \
         exit 1; \
     fi
-
-# Stamp the built ref + resolved commit into the image so downstream
-# consumers (e.g. AudioMuse-AI's entrypoint) can detect a MIGraphX change
-# across BASE_IMAGE bumps and invalidate their compiled-model cache instead
-# of silently recompiling against a stale cache forever.
-RUN echo "${MIGRAPHX_REF} $(git -C /migraphx-src rev-parse HEAD)" > /opt/rocm/migraphx-version.txt
 
 FROM ${ROCBLAS_IMAGE} AS pytorch-builder
 
@@ -568,7 +575,8 @@ RUN --mount=type=cache,target=/root/.ccache,id=pytorch-ccache \
             USE_FLASH_ATTENTION=0 USE_MEM_EFF_ATTENTION=0 \
             USE_DISTRIBUTED=0 USE_ROCM_CK_GEMM=$ck_gemm \
             python3 setup.py bdist_wheel && \
-        cp dist/*.whl /pytorch/dist/; \
+        cp dist/*.whl /pytorch/dist/ && \
+        rm -rf /pytorch-src; \
     }; \
     DECISION=$(cat /tmp/pytorch-decision.txt) && \
     REST="${DECISION#PYTORCH_PLAN:}" && \
@@ -698,7 +706,8 @@ RUN LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /buil
             "https://github.com/${REPO}.git" /torchvision-src && \
         cd /torchvision-src && \
         LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH python3 setup.py bdist_wheel && \
-        cp dist/*.whl /torchvision/dist/; \
+        cp dist/*.whl /torchvision/dist/ && \
+        rm -rf /torchvision-src; \
     fi
 
 # Build-time ABI check: the PIP path resolves torch and torchvision independently (separate
@@ -768,7 +777,8 @@ RUN LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /buil
             "https://github.com/${REPO}.git" /torchaudio-src && \
         cd /torchaudio-src && \
         LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH python3 setup.py bdist_wheel && \
-        cp dist/*.whl /torchaudio/dist/; \
+        cp dist/*.whl /torchaudio/dist/ && \
+        rm -rf /torchaudio-src; \
     fi
 
 # Build-time ABI check, same reasoning as torchvision-builder's: torch and torchaudio are
