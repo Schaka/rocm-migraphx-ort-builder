@@ -140,11 +140,18 @@ RUN set -eux; \
     # (the runtime .so) was present, amdrocm-runtime-dev/amdrocm-core-dev (headers + HIP's own
     # hip-config.cmake) were not, which is exactly why rocMLIR's cmake configure step below fails
     # with "Could not find a package configuration file provided by hip". Install them explicitly.
+    # amdrocm-llvm/-llvm-dev carry the ROCm device compiler (clang/clang++/lld and the
+    # amdgcn device bitcode), and amdrocm-hpc-sdk does NOT depend on either: its Depends
+    # line lists only its own per-gfx amdrocm-hpc-sdk10.1-gfx<arch> siblings. Any clang
+    # that shows up without naming these explicitly arrived through some peripheral
+    # library's transitive dependency, which is not a contract -- name them, so the
+    # compiler every builder stage below invokes is actually a declared input of this base.
     apt-get update && apt-get install -y --no-install-recommends \
         amdrocm-hpc-sdk amdrocm-core-dev amdrocm-runtime-dev \
+        amdrocm-llvm amdrocm-llvm-dev \
     && rm -rf /var/lib/apt/lists/*; \
     # amdrocm-hpc-sdk lands everything under /opt/rocm/core-<major.minor>/ (bin, include, lib,
-    # libexec, llvm, share, amdgcn) with NO top-level convenience symlinks -- unlike
+    # libexec, share, amdgcn) with NO top-level convenience symlinks -- unlike
     # rocm/dev-ubuntu-26.04, which symlinks include/lib/share/etc at /opt/rocm/ straight into its
     # own versioned core dir (see rocblas-builder's comment below for that same layout on the
     # official image). Every other stage in this Dockerfile hardcodes paths like
@@ -154,7 +161,31 @@ RUN set -eux; \
     if [ -z "$core_dir" ]; then echo "FATAL: no /opt/rocm/core-* dir found after install" >&2; exit 1; fi; \
     for d in "$core_dir"/*; do \
         ln -s "$(basename "$core_dir")/$(basename "$d")" "/opt/rocm/$(basename "$d")"; \
-    done
+    done; \
+    # The compiler needs one more symlink than that loop can produce. TheRock installs it
+    # NESTED, at core-<ver>/lib/llvm (verified in amdrocm-llvm10.1's own file list), so the
+    # loop -- which only links direct children of core-<ver>/ -- yields /opt/rocm/lib and
+    # therefore a working /opt/rocm/lib/llvm/bin/clang++, but no /opt/rocm/llvm at all.
+    # AMD's rocm/dev-ubuntu-26.04 puts the compiler at /opt/rocm/llvm/bin/clang++, and that
+    # is the path this Dockerfile hardcodes everywhere (and the path a pinned release build
+    # against AMD's own image gets), so this base has to expose it under the same name.
+    # Searched for rather than hardcoded: whether upstream ships llvm as core-<ver>/llvm or
+    # core-<ver>/lib/llvm has changed before, and either layout resolves correctly here.
+    if [ ! -e /opt/rocm/llvm ]; then \
+        llvm_dir=$(find "$core_dir" -mindepth 1 -maxdepth 2 -type d -name llvm | head -1); \
+        if [ -z "$llvm_dir" ]; then \
+            echo "FATAL: no llvm directory under ${core_dir} after installing amdrocm-llvm." >&2; \
+            find "$core_dir" -maxdepth 2 -type d >&2; \
+            exit 1; \
+        fi; \
+        ln -sfn "${llvm_dir#/opt/rocm/}" /opt/rocm/llvm; \
+    fi; \
+    # Hard gate on the result. Without it a base missing the compiler still builds and
+    # publishes happily, and the breakage only surfaces hours later in migraphx-builder as
+    # cmake's "is not a full path to an existing compiler tool" -- or, worse, as that
+    # stage's unrelated-looking python-ABI guard. Fail here, where the cause is obvious.
+    /opt/rocm/llvm/bin/clang++ --version; \
+    echo "OK: /opt/rocm/llvm/bin/clang++ present (-> $(readlink -f /opt/rocm/llvm))"
 
 # Shared ancestor for every stage below: this base image's native python3 is
 # 3.14, but AudioMuse-AI (and other downstream consumers) pin numpy in a way
@@ -474,13 +505,19 @@ RUN --mount=type=cache,target=/root/.ccache,id=migraphx-ccache \
         -DCMAKE_C_COMPILER_LAUNCHER=ccache \
         -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
         ${extra_cmake_args} \
-        -T install; \
+        -T install \
+    # &&, not ; -- a RUN's exit status is its LAST command's, so separating the
+    # build from the stamp/cleanup below with a semicolon makes any rbuild
+    # failure exit 0: the layer commits with no MIGraphX in it, and the first
+    # sign of trouble is whatever unrelated guard trips next.
+    && \
     # Stamp the built ref + resolved commit into the image so downstream
     # consumers (e.g. AudioMuse-AI's entrypoint) can detect a MIGraphX change
     # across BASE_IMAGE bumps and invalidate their compiled-model cache instead
     # of silently recompiling against a stale cache forever. Captured here
     # (not a later RUN) so it can run before /migraphx-src is removed below.
-    echo "${MIGRAPHX_REF} $(git -C /migraphx-src rev-parse HEAD)" > /opt/rocm/migraphx-version.txt; \
+    echo "${MIGRAPHX_REF} $(git -C /migraphx-src rev-parse HEAD)" > /opt/rocm/migraphx-version.txt \
+    && \
     # rbuild's dependency tree (a full rocMLIR/LLVM build, easily tens of GB)
     # and the MIGraphX source/build dir are both fully installed into /opt/rocm
     # by now -- rm'ing them inside this same RUN (rather than a later one)
