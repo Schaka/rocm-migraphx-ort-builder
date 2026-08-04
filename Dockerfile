@@ -39,8 +39,8 @@ ARG BASE_IMAGE=ghcr.io/schaka/rocm-builder:latest
 ARG ROCBLAS_IMAGE=rocblas-builder
 ARG MIGRAPHX_IMAGE=migraphx-builder
 ARG PYTORCH_IMAGE=pytorch-builder
-ARG TORCHVISION_IMAGE=torchvision-builder
-ARG TORCHAUDIO_IMAGE=torchaudio-builder
+ARG TORCHVISION_IMAGE=torchvision-dist
+ARG TORCHAUDIO_IMAGE=torchaudio-dist
 ARG ORT_IMAGE=ort-builder
 
 # Git ref to build MIGraphX from. Defaults to the moving `develop` branch;
@@ -807,6 +807,21 @@ RUN --mount=type=bind,from=pytorch-export,source=/pytorch/dist,target=/wheels-to
     rm -rf /torchvision-src; \
     verify
 
+# Publication target for the torchvision component -- CI builds THIS, not torchvision-builder.
+# The builder stage is a full ROCm base plus an apt toolchain plus a /build-venv with torch
+# installed in it: ~25GB published, of which the final stage consumes exactly one wheel. A bind
+# mount cannot pull part of an image, so publishing the builder makes the final job download all
+# 25GB to read that one file -- on a runner that has no room for it. scratch + the wheel is the
+# whole contract the final stage actually needs.
+#
+# ONLY torchvision's own wheel: everything else `pip download` leaves in dist/ (torch, triton,
+# rocm_sdk_*, and the shared transitive deps) is either a byte-identical duplicate of what
+# pytorch-export already hands the final stage, or resolvable from PyPI there. Dropping the
+# duplicate torch wheel cannot mask a torch/torchvision mismatch either -- torchvision-builder's
+# own ABI gate above has already imported this exact wheel against that exact torch.
+FROM scratch AS torchvision-dist
+COPY --from=torchvision-builder /torchvision/dist/torchvision-*.whl /torchvision/dist/
+
 FROM ${ROCBLAS_IMAGE} AS torchaudio-builder
 
 ARG PYTORCH_VERSION=v2.13.0
@@ -913,6 +928,10 @@ RUN --mount=type=bind,from=pytorch-export,source=/pytorch/dist,target=/wheels-to
     cd /; \
     rm -rf /torchaudio-src; \
     verify
+
+# Publication target for the torchaudio component -- same reasoning as torchvision-dist above.
+FROM scratch AS torchaudio-dist
+COPY --from=torchaudio-builder /torchaudio/dist/torchaudio-*.whl /torchaudio/dist/
 
 # Indirection stages: `COPY --from=$VAR` isn't allowed (BuildKit rejects a
 # variable in --from), so resolve each component-image ARG through a FROM with

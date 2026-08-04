@@ -152,7 +152,7 @@ jobs:
     with:
       arch: ${{ inputs.arch }}
       component: torchvision
-      target: torchvision-builder
+      target: torchvision-dist
       with-rocblas-image: ${{ inputs.arch == 'gfx900' || inputs.arch == 'gfx906' || inputs.arch == 'gfx90c' }}
       with-pytorch-image: true
       release-tag: ${{ inputs.release-tag }}
@@ -173,7 +173,7 @@ jobs:
     with:
       arch: ${{ inputs.arch }}
       component: torchaudio
-      target: torchaudio-builder
+      target: torchaudio-dist
       with-rocblas-image: ${{ inputs.arch == 'gfx900' || inputs.arch == 'gfx906' || inputs.arch == 'gfx90c' }}
       with-pytorch-image: true
       release-tag: ${{ inputs.release-tag }}
