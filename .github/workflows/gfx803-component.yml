@@ -1,7 +1,7 @@
 name: Build gfx803 component
 
 # Reusable single-component build for the Polaris/gfx803 variant
-# (gfx803/Dockerfile.gfx803). Structurally the same idea as build-component.yml --
+# (gfx803/Dockerfile). Structurally the same idea as build-component.yml --
 # each component gets its own runner and its own 360-minute budget, and
 # publishes an intermediate image the next component COPYs from -- but kept as
 # a separate workflow rather than parameterising the main one, because almost
@@ -85,44 +85,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Debug session (tmate)
-        if: inputs.debug
-        uses: mxschmitt/action-tmate@v3
-        with:
-          detached: true
-          limit-access-to-actor: true
-
       # Same disk pressure as the main pipeline, and then some: the
       # 6.4.x-complete base is a full ROCm install rather than a runtime-only
       # one, and rocBLAS's Tensile step generates a large intermediate tree even
-      # for a single architecture (which is why the Dockerfile passes
-      # --cleanup). swap-storage: false keeps the runner's swap as a
+      # for a single architecture (which is why the Dockerfile passes --cleanup).
+      # The non-zero swap size keeps the runner's own swap in place as a
       # memory-pressure safety net for the compile stages.
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@v1.3.1
+      - name: Prepare runner
+        uses: ./.github/actions/prepare-runner
         with:
-          tool-cache: true
-          docker-images: true
-          swap-storage: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-
-      - name: Set swap space
-        uses: pierotofy/set-swap-space@master
-        with:
-          swap-size-gb: 16
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to ghcr.io
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          debug: ${{ inputs.debug }}
+          swap-size-gb: '16'
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Compute build date
         id: date
@@ -130,7 +105,7 @@ jobs:
 
       # Same packages the main pipeline publishes to, with gfx803 as just
       # another arch tag. Unlike every other tag in them, these are built from
-      # Dockerfile.gfx803 on a ROCm 6.4.4 base -- the tag doesn't say so; see
+      # Dockerfile on a ROCm 6.4.4 base -- the tag doesn't say so; see
       # gfx803/README.md. Downstream consumers want the final one; the rest are
       # build plumbing.
       - name: Assemble tags, build-args and cache ref
@@ -206,7 +181,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: gfx803
-          file: gfx803/Dockerfile.gfx803
+          file: gfx803/Dockerfile
           push: true
           target: ${{ inputs.target }}
           tags: ${{ steps.meta.outputs.tags }}

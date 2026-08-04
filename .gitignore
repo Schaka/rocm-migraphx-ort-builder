@@ -1,6 +1,8 @@
 HELP.md
 .gradle
-build/
+# Root-anchored: an unanchored "build/" also matches scripts/build/, which is
+# source, not build output.
+/build/
 .kotlin
 !gradle/wrapper/gradle-wrapper.jar
 !**/src/main/**/build/

@@ -1,12 +1,17 @@
 name: Build component
 
 # Reusable single-component build. Called once per component per arch by
-# nightly.yml, so rocblas / migraphx / pytorch / torchvision / torchaudio / ort /
-# final each run as their own job on
-# their own fresh runner with their own 360-minute budget, instead of all
-# racing a single 6h ceiling in one monolithic build. Each component pushes an
-# intermediate image (ghcr .../:<component>-<arch>) that the jobs downstream of
-# it COPY from, so no component recompiles another component's work.
+# build-pipeline.yml, so rocblas / migraphx / pytorch / torchvision / torchaudio
+# / ort / final each run as their own job on their own fresh runner with their
+# own 360-minute budget, instead of all racing a single 6h ceiling in one
+# monolithic build. Each component pushes an image the jobs downstream of it
+# consume as a build context, so no component recompiles another's work.
+#
+# This workflow deliberately contains no build logic: which Dockerfile a
+# component uses, what it is tagged, where its cache lives and which sibling
+# images it pulls from are all decided in docker-bake.hcl. Everything here is
+# either a runner concern or a variable being handed to bake -- which also means
+# `docker buildx bake <component>` locally reproduces exactly what CI does.
 
 on:
   workflow_call:
@@ -16,51 +21,41 @@ on:
         required: true
         type: string
       component:
-        description: 'Component name -- drives the image tag and cache ref (rocblas|migraphx|pytorch|torchvision|torchaudio|ort|final)'
+        description: 'Bake target to build (rocblas|migraphx|pytorch|torchvision|torchaudio|ort|final)'
         required: true
         type: string
-      target:
-        description: 'Dockerfile target stage to build; empty string builds the final image'
-        required: false
-        type: string
-        default: ''
-      final:
-        description: 'Tag as the published :latest-<arch>/:<date>-<arch> image instead of a :<component>-<arch> intermediate'
-        required: false
-        type: boolean
-        default: false
       with-rocblas-image:
-        description: 'Pass ROCBLAS_IMAGE so this build starts FROM the prebuilt rocBLAS image instead of rebuilding that stage'
+        description: 'Start FROM the prebuilt rocBLAS image instead of rebuilding that component'
         required: false
         type: boolean
         default: false
       with-migraphx-image:
-        description: 'Pass MIGRAPHX_IMAGE so this build COPYs from the prebuilt migraphx image'
+        description: 'Consume the prebuilt migraphx image instead of rebuilding it'
         required: false
         type: boolean
         default: false
       with-pytorch-image:
-        description: 'Pass PYTORCH_IMAGE so this build COPYs from the prebuilt pytorch image'
+        description: 'Consume the prebuilt pytorch image instead of rebuilding it'
         required: false
         type: boolean
         default: false
       with-torchvision-image:
-        description: 'Pass TORCHVISION_IMAGE so this build COPYs from the prebuilt torchvision image'
+        description: 'Consume the prebuilt torchvision image instead of rebuilding it'
         required: false
         type: boolean
         default: false
       with-torchaudio-image:
-        description: 'Pass TORCHAUDIO_IMAGE so this build COPYs from the prebuilt torchaudio image'
+        description: 'Consume the prebuilt torchaudio image instead of rebuilding it'
         required: false
         type: boolean
         default: false
       with-ort-image:
-        description: 'Pass ORT_IMAGE so this build COPYs from the prebuilt ort image'
+        description: 'Consume the prebuilt ort image instead of rebuilding it'
         required: false
         type: boolean
         default: false
       swap-size-gb:
-        description: 'Size of the swapfile to add, in GB. 0 skips the swapfile entirely AND lets the disk-cleanup step reclaim the runner''s own preinstalled swap -- for jobs that only pull images and install wheels, where a swapfile is 16GB+ of root-disk space spent on memory headroom nothing needs.'
+        description: 'Swapfile size in GB; 0 skips it and reclaims the runner''s own swap (see the composite action)'
         required: false
         type: number
         default: 16
@@ -75,27 +70,27 @@ on:
         type: string
         default: ''
       pytorch-version:
-        description: 'PYTORCH_VERSION build-arg override (e.g. "v2.13.0"). Empty keeps the Dockerfile default on the pytorch/torchvision/torchaudio targets (nightly wants this passed as an explicit empty string, not omitted, so it truly floats instead of falling back to the Dockerfile default).'
+        description: 'PYTORCH_VERSION override (e.g. "v2.13.0"). Empty floats fully -- what nightly wants.'
         required: false
         type: string
         default: ''
       rocm-release:
-        description: 'ROCM_RELEASE build-arg override (e.g. "7.14"). Empty = nightly-mode wheel discovery on whichever target reads it, and (on rocblas) build from rocm-libraries'' own develop branch instead of a pinned therock-<release> tag.'
+        description: 'ROCM_RELEASE override (e.g. "7.14"). Empty = nightly-mode wheel discovery, and rocBLAS builds from rocm-libraries'' develop branch instead of a pinned therock-<release> tag.'
         required: false
         type: string
         default: ''
       base-image:
-        description: 'BASE_IMAGE build-arg override. Empty keeps the Dockerfile default (rocm/dev-ubuntu-26.04:7.14.0-full).'
+        description: 'BASE_IMAGE override. Empty keeps docker-bake.hcl''s default (our own nightly rocm-builder).'
         required: false
         type: string
         default: ''
       use-prebuilt:
-        description: 'Sets USE_PREBUILT_PYTORCH/TORCHVISION/TORCHAUDIO together (true = 1, false = 0). Only meaningful for the pytorch/torchvision/torchaudio targets.'
+        description: 'Try prebuilt AMD wheels for pytorch/torchvision/torchaudio first (true = 1, false = 0).'
         required: false
         type: boolean
         default: true
       ort-version:
-        description: 'ORT_VERSION build-arg override (e.g. "v1.28.0"). Empty keeps the Dockerfile default. Only meaningful for the ort target.'
+        description: 'ORT_VERSION override (e.g. "v1.28.0"). Empty keeps docker-bake.hcl''s default.'
         required: false
         type: string
         default: ''
@@ -116,225 +111,51 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Debug session (tmate)
-        if: inputs.debug
-        uses: mxschmitt/action-tmate@v3
+      - name: Prepare runner
+        uses: ./.github/actions/prepare-runner
         with:
-          detached: true
-          limit-access-to-actor: true
-
-      # Fat multi-arch image (all ROCM_ARCH targets baked into one binary) is
-      # infeasible on hosted runners: official rocm/pytorch, which bakes in
-      # only 5 archs, runs ~54GB uncompressed -- past the ~14GB disk hosted
-      # runners ship with, even after cleanup. Building/tagging one image per
-      # arch instead keeps each job's disk footprint to a single arch's worth
-      # of kernel binaries. swap-storage is kept (the action removes it by
-      # default) as a memory-pressure safety net for the compile stages -- but
-      # swap is root-disk space, so a job declaring swap-size-gb: 0 (i.e. one
-      # that compiles nothing, see that input's description) hands it back.
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@v1.3.1
-        with:
-          tool-cache: true
-          docker-images: true
-          swap-storage: ${{ inputs.swap-size-gb == 0 }}
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-
-      # Report what's actually available before the build starts: when a build
-      # does fail on space, the log otherwise gives no baseline to compare the
-      # failure against.
-      - name: Report free disk space
-        run: df -h / /mnt
-
-      # Skipped entirely when swap-size-gb is 0 -- see that input's description.
-      - name: Set swap space
-        if: inputs.swap-size-gb != 0
-        uses: pierotofy/set-swap-space@master
-        with:
+          debug: ${{ inputs.debug }}
           swap-size-gb: ${{ inputs.swap-size-gb }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to ghcr.io
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Compute build date
-        id: date
-        run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
-
-      # Assemble build-args, tags and the cache ref here (not inline in the
-      # build step): each component publishes to its OWN ghcr package
-      # (rocm-rocblas-builder / rocm-migraphx-builder / -torch-builder /
-      # -ort-builder, final -> -ort-torch-builder) rather than sharing one
-      # package under many
-      # component-prefixed tags, so a package's tags are only that component's
-      # arches -- no incomplete-image tags cluttering the published product.
-      # pkg() maps a component name to its full package ref; a build needs it
-      # both for its own push target (self) and for the sibling images it COPYs
-      # from, so it's a function, not a single var.
-      - name: Assemble tags, build-args and cache ref
-        id: meta
+      - name: Build and push ${{ inputs.component }}
+        env:
+          COMPONENT: ${{ inputs.component }}
+          OWNER: ${{ github.repository_owner }}
+          REGISTRY_CACHE: 'true'
+          CACHE_TARGET: ${{ inputs.component }}
+          ROCM_ARCH: ${{ inputs.arch }}
+          BASE_IMAGE_IN: ${{ inputs.base-image }}
+          ORT_VERSION_IN: ${{ inputs.ort-version }}
+          MIGRAPHX_REF: ${{ inputs.migraphx-ref }}
+          RELEASE_TAG: ${{ inputs.release-tag }}
+          # Emitted even when empty -- an explicit empty value is what makes
+          # nightly float, instead of inheriting the pinned bake default.
+          PYTORCH_VERSION: ${{ inputs.pytorch-version }}
+          ROCM_RELEASE: ${{ inputs.rocm-release }}
+          USE_PREBUILT: ${{ inputs.use-prebuilt && '1' || '0' }}
+          WITH_ROCBLAS_IMAGE: ${{ inputs.with-rocblas-image }}
+          WITH_MIGRAPHX_IMAGE: ${{ inputs.with-migraphx-image }}
+          WITH_PYTORCH_IMAGE: ${{ inputs.with-pytorch-image }}
+          WITH_TORCHVISION_IMAGE: ${{ inputs.with-torchvision-image }}
+          WITH_TORCHAUDIO_IMAGE: ${{ inputs.with-torchaudio-image }}
+          WITH_ORT_IMAGE: ${{ inputs.with-ort-image }}
         run: |
-          owner="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
-          pkg() {
-            case "$1" in
-              rocblas)     echo "${owner}/rocm-rocblas-builder" ;;
-              migraphx)    echo "${owner}/rocm-migraphx-builder" ;;
-              pytorch)     echo "${owner}/rocm-migraphx-torch-builder" ;;
-              torchvision) echo "${owner}/rocm-torchvision-builder" ;;
-              torchaudio)  echo "${owner}/rocm-torchaudio-builder" ;;
-              ort)         echo "${owner}/rocm-migraphx-ort-builder" ;;
-              final)       echo "${owner}/rocm-migraphx-ort-torch-builder" ;;
-            esac
-          }
-          arch="${{ inputs.arch }}"
-          component="${{ inputs.component }}"
-          self="$(pkg "${component}")"
+          set -euo pipefail
+          # Lowercased: ghcr package paths are case-sensitive and always lower.
+          export OWNER="${OWNER,,}"
+          export DATE
+          DATE="$(date -u +%Y%m%d)"
+          export SOURCE_DATE="$DATE"
 
-          # migraphx-ref only changes what the migraphx component actually
-          # builds, but ort and final both COPY its /opt/rocm output, so they
-          # (and their own published tags) need to key off the same ref too --
-          # otherwise a pinned-ref rebuild would silently overwrite the
-          # develop-tracking ort/final tags, or reuse a stale develop-built
-          # migraphx layer via cache. pytorch is independent of MIGraphX
-          # entirely, so it always keeps the plain arch tag/cache regardless
-          # of migraphx-ref, and doesn't need rebuilding per-ref. rocBLAS is
-          # upstream of migraphx and equally independent of its ref, so it's
-          # exempt too -- a pinned-ref (nightly, develop-tracking-migraphx-only)
-          # run reuses the same rocBLAS/pytorch image. torchvision/torchaudio
-          # build against pytorch and never touch MIGraphX at all, so they're
-          # exempt for exactly the same reason pytorch is.
-          #
-          # A manual release build is a different case entirely: release_tag
-          # (e.g. "rocm7.14") applies to EVERY component, including pytorch and
-          # rocblas -- both actually do vary by ROCm release (rocblas is
-          # rebuilt from a ROCM_RELEASE-pinned source ref; pytorch's own
-          # PYTORCH_VERSION/ROCM_RELEASE build-args differ in release mode).
-          # Exempting them here would tag a release build's pytorch/rocblas
-          # image with the exact same plain "<arch>" tag nightly already uses
-          # for that arch, silently overwriting (or being overwritten by)
-          # whichever build ran more recently instead of being its own
-          # versioned artifact.
-          ref="${{ inputs.migraphx-ref }}"
-          release_tag="${{ inputs.release-tag }}"
-          suffix=""
-          if [ -n "$release_tag" ]; then
-            suffix="-${release_tag}"
-          elif [ "$ref" != "develop" ] \
-               && [ "$component" != "pytorch" ] && [ "$component" != "rocblas" ] \
-               && [ "$component" != "torchvision" ] && [ "$component" != "torchaudio" ]; then
-            suffix="-$(echo "$ref" | tr -sc 'A-Za-z0-9' '-' | sed 's/^-*//;s/-*$//')"
-          fi
-          tag_arch="${arch}${suffix}"
+          # Empty inputs must NOT override a bake default that is meant to win
+          # (unlike PYTORCH_VERSION/ROCM_RELEASE above, whose empty value is the
+          # nightly-floats signal), so these two are only exported when set.
+          if [ -n "$BASE_IMAGE_IN" ]; then export BASE_IMAGE="$BASE_IMAGE_IN"; fi
+          if [ -n "$ORT_VERSION_IN" ]; then export ORT_VERSION="$ORT_VERSION_IN"; fi
 
-          {
-            echo "build-args<<ARGS_EOF"
-            echo "ROCM_ARCH=${arch}"
-            if [ "${component}" = "migraphx" ]; then
-              echo "MIGRAPHX_REF=${ref}"
-              if [ "$ref" = "develop" ]; then
-                echo "SOURCE_DATE=${{ steps.date.outputs.date }}"
-              fi
-            fi
-            if [ "${{ inputs.with-rocblas-image }}" = "true" ]; then
-              echo "ROCBLAS_IMAGE=$(pkg rocblas):${tag_arch}"
-            fi
-            if [ "${{ inputs.with-migraphx-image }}" = "true" ]; then
-              echo "MIGRAPHX_IMAGE=$(pkg migraphx):${arch}${suffix}"
-            fi
-            if [ "${{ inputs.with-pytorch-image }}" = "true" ]; then
-              echo "PYTORCH_IMAGE=$(pkg pytorch):${tag_arch}"
-            fi
-            if [ "${{ inputs.with-torchvision-image }}" = "true" ]; then
-              echo "TORCHVISION_IMAGE=$(pkg torchvision):${tag_arch}"
-            fi
-            if [ "${{ inputs.with-torchaudio-image }}" = "true" ]; then
-              echo "TORCHAUDIO_IMAGE=$(pkg torchaudio):${tag_arch}"
-            fi
-            if [ "${{ inputs.with-ort-image }}" = "true" ]; then
-              echo "ORT_IMAGE=$(pkg ort):${arch}${suffix}"
-            fi
-            # Only the final stage's ENV actually reads this (see Dockerfile) --
-            # harmless to pass on every component, since gfx900/gfx906/gfx90c is
-            # the only case where it's not the Dockerfile's own default of 1.
-            case "${arch}" in
-              gfx900|gfx906|gfx90c) echo "TORCH_BLAS_PREFER_HIPBLASLT=0" ;;
-            esac
-            # PYTORCH_VERSION/ROCM_RELEASE are always emitted, even empty -- a `docker build
-            # --build-arg PYTORCH_VERSION=` (empty) is NOT the same as omitting the flag: an
-            # explicit empty value wins over the Dockerfile ARG's own default, which is exactly
-            # what nightly needs (float fully) instead of silently inheriting the pinned
-            # default. Harmless on targets that don't read these ARGs at all.
-            echo "PYTORCH_VERSION=${{ inputs.pytorch-version }}"
-            echo "ROCM_RELEASE=${{ inputs.rocm-release }}"
-            if [ -n "${{ inputs.base-image }}" ]; then
-              echo "BASE_IMAGE=${{ inputs.base-image }}"
-            fi
-            if [ -n "${{ inputs.ort-version }}" ]; then
-              echo "ORT_VERSION=${{ inputs.ort-version }}"
-            fi
-            use_prebuilt="${{ inputs.use-prebuilt == true && '1' || '0' }}"
-            echo "USE_PREBUILT_PYTORCH=${use_prebuilt}"
-            echo "USE_PREBUILT_TORCHVISION=${use_prebuilt}"
-            echo "USE_PREBUILT_TORCHAUDIO=${use_prebuilt}"
-            echo "ARGS_EOF"
-          } >> "$GITHUB_OUTPUT"
-
-          if [ "${{ inputs.final }}" = "true" ]; then
-            if [ -n "$release_tag" ]; then
-              # Release build: one immutable "<release-tag>-<arch>" tag, not the
-              # develop-tracking :latest-<arch>/:<date>-<arch> pair -- those two
-              # are meant to move nightly, a release tag is meant to never change
-              # under the same name again.
-              echo "tags=${self}:${release_tag}-${arch}" >> "$GITHUB_OUTPUT"
-            else
-              {
-                echo "tags<<TAGS_EOF"
-                echo "${self}:latest-${tag_arch}"
-                echo "${self}:${{ steps.date.outputs.date }}-${tag_arch}"
-                echo "TAGS_EOF"
-              } >> "$GITHUB_OUTPUT"
-            fi
-          else
-            echo "tags=${self}:${tag_arch}" >> "$GITHUB_OUTPUT"
-          fi
-
-          # final exports no cache at all, and consequently reads none either.
-          # Nothing builds FROM the final image, so its cache has no consumer;
-          # and every expensive component it needs arrives as a prebuilt image
-          # (see build-pipeline.yml), leaving it nothing but image pulls and a
-          # few wheel installs -- cheap to redo on a retry. Exporting anyway
-          # costs a second compressed copy of every layer unique to the build,
-          # written to the same nearly-full runner disk. cache-from without a
-          # cache-to would only ever 404, hence both empty.
-          if [ "${{ inputs.final }}" = "true" ]; then
-            echo "cache-from=" >> "$GITHUB_OUTPUT"
-            echo "cache-to=" >> "$GITHUB_OUTPUT"
-          else
-            cache_ref="${self}:cache-${tag_arch}"
-            echo "cache-from=type=registry,ref=${cache_ref}" >> "$GITHUB_OUTPUT"
-            echo "cache-to=type=registry,ref=${cache_ref},mode=max" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build and push image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          target: ${{ inputs.target }}
-          tags: ${{ steps.meta.outputs.tags }}
-          build-args: ${{ steps.meta.outputs.build-args }}
-          cache-from: ${{ steps.meta.outputs.cache-from }}
-          cache-to: ${{ steps.meta.outputs.cache-to }}
-          # Nothing consumes the provenance attestation, and producing it turns
-          # every push into an index with a second, attestation-only manifest.
-          # Off publishes a plain single-platform manifest instead.
-          provenance: false
+          # Printed first so a failed build has the fully resolved graph -- tags,
+          # contexts, args, cache refs -- right above it in the log.
+          docker buildx bake --print "$COMPONENT"
+          docker buildx bake --push "$COMPONENT"

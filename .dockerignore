@@ -1,0 +1,11 @@
+# The build context is the repo root; only docker/, scripts/ and the bake file
+# are ever read from it. Everything below is either large, machine-local, or
+# irrelevant to a build -- excluded so it isn't hashed into every context
+# transfer.
+.git
+.github
+.idea
+.claude
+.tokensave
+gfx803
+README.md

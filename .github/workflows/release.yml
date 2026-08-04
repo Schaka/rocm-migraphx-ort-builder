@@ -88,20 +88,13 @@ jobs:
   set-matrix:
     runs-on: ubuntu-latest
     outputs:
-      arches: ${{ steps.set.outputs.arches }}
+      arches: ${{ steps.m.outputs.arches }}
     steps:
-      - name: Resolve arch matrix
-        id: set
-        run: |
-          if [ "${{ inputs.arch }}" = "gfx803" ]; then
-            echo "gfx803 is not built by this workflow -- run 'Build gfx803 (Polaris)' instead." >&2
-            exit 1
-          fi
-          if [ -n "${{ inputs.arch }}" ]; then
-            echo "arches=[\"${{ inputs.arch }}\"]" >> "$GITHUB_OUTPUT"
-          else
-            echo 'arches=["gfx900","gfx90c","gfx906","gfx908","gfx90a","gfx942","gfx950","gfx1010","gfx1011","gfx1012","gfx1030","gfx1031","gfx1032","gfx1034","gfx1035","gfx1036","gfx1100","gfx1101","gfx1102","gfx1103","gfx1150","gfx1151","gfx1152","gfx1153","gfx1200","gfx1201"]' >> "$GITHUB_OUTPUT"
-          fi
+      - uses: actions/checkout@v4
+      - id: m
+        uses: ./.github/actions/arch-matrix
+        with:
+          arch: ${{ inputs.arch }}
 
   build:
     needs: [set-version, set-matrix]

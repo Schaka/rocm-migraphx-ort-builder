@@ -3,22 +3,21 @@ name: Build pipeline (single arch)
 # Runs the full [rocblas ->] migraphx -> ort -> final chain for ONE arch, plus
 # the parallel [rocblas ->] pytorch -> {torchvision, torchaudio} -> final chain,
 # which is independent of MIGraphX. Called once per arch from a matrix in
-# nightly.yml. The rocblas job only exists for gfx900/gfx906/gfx90c.
+# nightly.yml / release.yml.
 #
 # Every component the `final` job needs is published as its own image by its own
 # job, so `final` itself only pulls images and installs wheels -- it compiles
 # nothing. That is load-bearing, not incidental: a hosted runner does not have
-# the disk for `final` to build any of these stages itself on top of the
+# the disk for `final` to build any of these components itself on top of the
 # ~10GB ROCm base it already has to pull.
 #
 # This exists because `needs` in GitHub Actions is job-level, not
-# matrix-cell-level: if migraphx/ort/final were each their own matrixed job
-# (as they used to be), `ort: needs: migraphx` would block on the ENTIRE
-# migraphx matrix finishing before ANY ort cell starts, even though each ort
-# cell only actually depends on its own arch's migraphx image. Wrapping the
-# whole per-arch chain in one reusable workflow and matrixing THAT instead
-# means each arch's migraphx/pytorch/ort/final run back-to-back on their own
-# schedule, independent of every other arch.
+# matrix-cell-level: if migraphx/ort/final were each their own matrixed job (as
+# they used to be), `ort: needs: migraphx` would block on the ENTIRE migraphx
+# matrix finishing before ANY ort cell starts, even though each ort cell only
+# depends on its own arch's migraphx image. Wrapping the whole per-arch chain in
+# one reusable workflow and matrixing THAT instead means each arch's chain runs
+# on its own schedule, independent of every other arch.
 
 on:
   workflow_call:
@@ -60,13 +59,20 @@ on:
         default: false
 
 jobs:
-  # gfx900/gfx906/gfx90c only: they're the only arches the Dockerfile rebuilds
-  # rocBLAS from source for, and elsewhere that stage is a no-op passthrough
-  # not worth publishing a full ROCm tree for. Its own job because migraphx and
-  # pytorch both build on top of it, and as separate jobs they'd otherwise each
-  # redo the (Tensile-heavy, hours-long) rebuild.
+  # The legacy-GCN arch list is spelled out inline in four places below rather
+  # than resolved once in a setup job: a job per arch to compute one boolean
+  # would add 26 more jobs to a full nightly matrix, and concurrency slots are
+  # the scarce resource here, not YAML lines. Keep it in sync with
+  # LEGACY_GCN_ARCHES in docker-bake.hcl, which drives what the build itself
+  # does; this only decides whether rocBLAS is worth its own job.
+  #
+  # gfx900/gfx906/gfx90c only: they're the only arches whose rocBLAS is rebuilt
+  # from source, and elsewhere that component is a no-op passthrough not worth
+  # publishing a full ROCm tree for. Its own job because migraphx and pytorch
+  # both build on top of it, and as separate jobs they'd otherwise each redo the
+  # (Tensile-heavy, hours-long) rebuild.
   rocblas:
-    if: ${{ inputs.arch == 'gfx900' || inputs.arch == 'gfx906' || inputs.arch == 'gfx90c' }}
+    if: ${{ contains(fromJSON('["gfx900","gfx906","gfx90c"]'), inputs.arch) }}
     permissions:
       contents: read
       packages: write
@@ -75,7 +81,6 @@ jobs:
     with:
       arch: ${{ inputs.arch }}
       component: rocblas
-      target: rocblas-builder
       release-tag: ${{ inputs.release-tag }}
       rocm-release: ${{ inputs.rocm-release }}
       base-image: ${{ inputs.base-image }}
@@ -84,8 +89,8 @@ jobs:
   # On every non-legacy arch the rocblas job above is skipped, which GitHub
   # reports as result == 'skipped' rather than 'success' -- hence both being
   # accepted here. with-rocblas-image is likewise only true where an image was
-  # actually published; elsewhere the Dockerfile's ROCBLAS_IMAGE default keeps
-  # resolving to the in-tree passthrough stage.
+  # actually published; elsewhere the bake graph keeps building the in-tree
+  # passthrough target.
   migraphx:
     needs: rocblas
     if: ${{ !cancelled() && (needs.rocblas.result == 'success' || needs.rocblas.result == 'skipped') }}
@@ -97,8 +102,7 @@ jobs:
     with:
       arch: ${{ inputs.arch }}
       component: migraphx
-      target: migraphx-builder
-      with-rocblas-image: ${{ inputs.arch == 'gfx900' || inputs.arch == 'gfx906' || inputs.arch == 'gfx90c' }}
+      with-rocblas-image: ${{ contains(fromJSON('["gfx900","gfx906","gfx90c"]'), inputs.arch) }}
       migraphx-ref: ${{ inputs.migraphx-ref }}
       release-tag: ${{ inputs.release-tag }}
       rocm-release: ${{ inputs.rocm-release }}
@@ -116,8 +120,7 @@ jobs:
     with:
       arch: ${{ inputs.arch }}
       component: pytorch
-      target: pytorch-builder
-      with-rocblas-image: ${{ inputs.arch == 'gfx900' || inputs.arch == 'gfx906' || inputs.arch == 'gfx90c' }}
+      with-rocblas-image: ${{ contains(fromJSON('["gfx900","gfx906","gfx90c"]'), inputs.arch) }}
       release-tag: ${{ inputs.release-tag }}
       base-image: ${{ inputs.base-image }}
       pytorch-version: ${{ inputs.pytorch-version }}
@@ -125,22 +128,12 @@ jobs:
       use-prebuilt: ${{ inputs.use-prebuilt }}
       debug: ${{ inputs.debug }}
 
-  # torchvision and torchaudio each need a working torch to build/verify
+  # torchvision and torchaudio each need a working torch to build and verify
   # against, so they hang off the pytorch job and consume its published image
-  # rather than rebuilding it. They used to have no jobs at all: the Dockerfile
-  # ARGs TORCHVISION_IMAGE/TORCHAUDIO_IMAGE were never passed by
-  # build-component.yml, so their default (the in-tree stage name) won, and the
-  # `final` job silently built BOTH stages itself -- two extra toolchain
-  # installs, two more copies of the ~1.7GB torch wheel installed into throwaway
-  # build venvs, and a second `pip download` of torch on top. That is what was
-  # exhausting the runner's disk in the final component. As their own jobs they
-  # run on their own runners, with their own disk, and `final` just pulls the
-  # results.
-  #
-  # Matrixed per-arch like everything else even though torchaudio's wheel is
-  # arch-independent (see the Dockerfile stage's own comment): the pipeline
-  # itself is per-arch, and this is no more work than the per-arch rebuild that
-  # was already happening inside `final`.
+  # rather than rebuilding it. As their own jobs they run on their own runners,
+  # with their own disk, and `final` just pulls the results -- previously the
+  # `final` job silently built both itself, which is what was exhausting its
+  # disk.
   torchvision:
     needs: pytorch
     if: ${{ !cancelled() && needs.pytorch.result == 'success' }}
@@ -152,8 +145,7 @@ jobs:
     with:
       arch: ${{ inputs.arch }}
       component: torchvision
-      target: torchvision-dist
-      with-rocblas-image: ${{ inputs.arch == 'gfx900' || inputs.arch == 'gfx906' || inputs.arch == 'gfx90c' }}
+      with-rocblas-image: ${{ contains(fromJSON('["gfx900","gfx906","gfx90c"]'), inputs.arch) }}
       with-pytorch-image: true
       release-tag: ${{ inputs.release-tag }}
       base-image: ${{ inputs.base-image }}
@@ -173,8 +165,7 @@ jobs:
     with:
       arch: ${{ inputs.arch }}
       component: torchaudio
-      target: torchaudio-dist
-      with-rocblas-image: ${{ inputs.arch == 'gfx900' || inputs.arch == 'gfx906' || inputs.arch == 'gfx90c' }}
+      with-rocblas-image: ${{ contains(fromJSON('["gfx900","gfx906","gfx90c"]'), inputs.arch) }}
       with-pytorch-image: true
       release-tag: ${{ inputs.release-tag }}
       base-image: ${{ inputs.base-image }}
@@ -194,7 +185,6 @@ jobs:
     with:
       arch: ${{ inputs.arch }}
       component: ort
-      target: ort-builder
       with-migraphx-image: true
       migraphx-ref: ${{ inputs.migraphx-ref }}
       release-tag: ${{ inputs.release-tag }}
@@ -214,12 +204,10 @@ jobs:
     with:
       arch: ${{ inputs.arch }}
       component: final
-      final: true
-      # Every component this stage needs arrives prebuilt -- with
-      # torchvision/torchaudio now included, the job pulls images and installs
-      # wheels and compiles nothing at all, hence swap-size-gb: 0 (see that
-      # input's description: the swapfile is otherwise 16GB of the root disk
-      # this stage kept running out of).
+      # Every component this job needs arrives prebuilt, so it pulls images and
+      # installs wheels and compiles nothing at all -- hence swap-size-gb: 0, the
+      # swapfile being otherwise 16GB of the root disk this job kept running out
+      # of.
       with-migraphx-image: true
       with-pytorch-image: true
       with-torchvision-image: true

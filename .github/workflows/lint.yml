@@ -1,0 +1,69 @@
+name: Lint build definitions
+
+# One short job, only when something that shapes a build actually changes. The
+# builds it guards run for hours on a matrix of 26 arches, so catching a broken
+# bake expression, an unquoted shell variable or a bad workflow reference here --
+# in about a minute -- is the cheapest check in the repo by a wide margin.
+
+on:
+  push:
+    paths:
+      - 'docker-bake.hcl'
+      - 'docker/**'
+      - 'scripts/**'
+      - '.github/**'
+      - 'gfx803/**'
+  pull_request:
+    paths:
+      - 'docker-bake.hcl'
+      - 'docker/**'
+      - 'scripts/**'
+      - '.github/**'
+      - 'gfx803/**'
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Resolves every target's full graph -- Dockerfile paths, named contexts,
+      # build args, tags, cache refs -- without building or pulling anything.
+      # Exercised under both variable sets, because the nightly and release paths
+      # take different branches through the tag/suffix logic.
+      - name: Resolve bake graph
+        run: |
+          set -euo pipefail
+          targets="rocm-base python-base rocblas migraphx pytorch torchvision torchaudio ort final"
+
+          echo "::group::nightly variables"
+          ROCM_ARCH=gfx1201 DATE=20260101 SOURCE_DATE=20260101 \
+          REGISTRY_CACHE=true CACHE_TARGET=migraphx \
+            docker buildx bake --print $targets
+          echo "::endgroup::"
+
+          echo "::group::release variables"
+          ROCM_ARCH=gfx900 RELEASE_TAG=rocm7.14 ROCM_RELEASE=7.14 \
+          MIGRAPHX_REF=release/rocm-rel-7.14 BASE_IMAGE=rocm/dev-ubuntu-26.04:7.14.0-full \
+          PYTORCH_VERSION=v2.13.0 USE_PREBUILT=0 \
+          WITH_ROCBLAS_IMAGE=true WITH_MIGRAPHX_IMAGE=true WITH_PYTORCH_IMAGE=true \
+          WITH_TORCHVISION_IMAGE=true WITH_TORCHAUDIO_IMAGE=true WITH_ORT_IMAGE=true \
+            docker buildx bake --print $targets
+          echo "::endgroup::"
+
+      # Every stage's real logic lives in these, so a typo here is a typo in the
+      # build. -S warning (not the default "style") keeps this to defects.
+      - name: ShellCheck
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -S warning scripts/*.sh scripts/lib/*.sh scripts/build/*.sh
+
+      - name: actionlint
+        uses: raven-actions/actionlint@v2
+        with:
+          fail-on-error: true

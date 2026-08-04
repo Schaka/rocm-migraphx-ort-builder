@@ -19,18 +19,18 @@ on:
         required: false
         default: false
 
-# The actual migraphx -> ort -> final chain (plus the independent pytorch
-# build) lives in build-pipeline.yml, one full run of which is matrixed per
-# arch here. Each arch's pipeline is a separate reusable-workflow call, so
-# arches run fully independently of each other -- one arch's migraphx build
-# never blocks another arch's ort/final.
+# The actual per-arch chain lives in build-pipeline.yml, one full run of which is
+# matrixed per arch here. Each arch's pipeline is a separate reusable-workflow
+# call, so arches run fully independently -- one arch's migraphx build never
+# blocks another arch's ort/final.
 jobs:
-  # Builds and publishes our own self-built ROCm base (Dockerfile's `rocm-builder` stage,
-  # tracking TheRock's nightly .deb feed) BEFORE the arch matrix, not per-arch -- it's
-  # arch-independent (one image covers every gfx target), and running it once here means a
-  # broken base build fails fast instead of being silently rebuilt (and re-failing) inside every
-  # one of the ~26 per-arch pipeline runs below. `build` depends on this job, so a failure here
-  # stops the whole nightly run before the matrix ever starts.
+  # Builds and publishes our own self-built ROCm base (the `rocm-base` bake
+  # target, tracking TheRock's nightly .deb feed) BEFORE the arch matrix, not
+  # per-arch -- it's arch-independent (one image covers every gfx target), and
+  # running it once here means a broken base build fails fast instead of being
+  # silently rebuilt (and re-failing) inside every one of the ~26 per-arch
+  # pipeline runs below. `build` depends on this job, so a failure here stops the
+  # whole nightly run before the matrix ever starts.
   rocm-base:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -38,64 +38,51 @@ jobs:
       contents: read
       packages: write
     outputs:
-      base-image: ${{ steps.meta.outputs.base-image }}
+      base-image: ${{ steps.build.outputs.base-image }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Log in to ghcr.io
-        uses: docker/login-action@v3
+
+      - name: Prepare runner
+        uses: ./.github/actions/prepare-runner
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Compute build date
-        id: date
-        run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
-      - name: Assemble tags and cache ref
-        id: meta
+          # Nothing here compiles; it is an apt install and a symlink dance.
+          swap-size-gb: '0'
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push rocm-base
+        id: build
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REGISTRY_CACHE: 'true'
+          CACHE_TARGET: rocm-base
         run: |
-          owner="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
-          echo "base-image=${owner}/rocm-builder:latest" >> "$GITHUB_OUTPUT"
-          echo "dated-image=${owner}/rocm-builder:${{ steps.date.outputs.date }}" >> "$GITHUB_OUTPUT"
-          echo "cache-ref=${owner}/rocm-builder:cache" >> "$GITHUB_OUTPUT"
-      - name: Build and push rocm-builder base image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          target: rocm-builder
-          tags: |
-            ${{ steps.meta.outputs.base-image }}
-            ${{ steps.meta.outputs.dated-image }}
-          build-args: |
-            SOURCE_DATE=${{ steps.date.outputs.date }}
-          cache-from: type=registry,ref=${{ steps.meta.outputs.cache-ref }}
-          cache-to: type=registry,ref=${{ steps.meta.outputs.cache-ref }},mode=max
+          set -euo pipefail
+          export OWNER="${OWNER,,}"
+          export DATE
+          DATE="$(date -u +%Y%m%d)"
+          export SOURCE_DATE="$DATE"
+
+          docker buildx bake --print rocm-base
+          docker buildx bake --push rocm-base
+
+          # Read the tag back out of the resolved graph rather than re-deriving
+          # it, so the matrix below can only ever consume what was just pushed.
+          base_image="$(docker buildx bake --print rocm-base \
+            | jq -r '.target["rocm-base"].tags[] | select(endswith(":latest"))')"
+          echo "base-image=${base_image}" >> "$GITHUB_OUTPUT"
 
   set-matrix:
     runs-on: ubuntu-latest
     outputs:
-      arches: ${{ steps.set.outputs.arches }}
+      arches: ${{ steps.m.outputs.arches }}
     steps:
-      - name: Resolve arch matrix
-        id: set
-        run: |
-          # gfx803 shares this pipeline's packages but not its Dockerfile: it is
-          # built from gfx803/Dockerfile.gfx803 on a ROCm 6.4.x base by
-          # gfx803.yml, because ROCm 7 can't enumerate Polaris at all. Letting
-          # it through here would build the 7.14 Dockerfile for it and overwrite
-          # the good gfx803 tags with something that can't run.
-          if [ "${{ github.event.inputs.arch }}" = "gfx803" ]; then
-            echo "gfx803 is not built by this workflow -- run 'Build gfx803 (Polaris)' instead." >&2
-            exit 1
-          fi
-          if [ -n "${{ github.event.inputs.arch }}" ]; then
-            echo "arches=[\"${{ github.event.inputs.arch }}\"]" >> "$GITHUB_OUTPUT"
-          else
-            echo 'arches=["gfx900","gfx90c","gfx906","gfx908","gfx90a","gfx942","gfx950","gfx1010","gfx1011","gfx1012","gfx1030","gfx1031","gfx1032","gfx1034","gfx1035","gfx1036","gfx1100","gfx1101","gfx1102","gfx1103","gfx1150","gfx1151","gfx1152","gfx1153","gfx1200","gfx1201"]' >> "$GITHUB_OUTPUT"
-          fi
+      - uses: actions/checkout@v4
+      - id: m
+        uses: ./.github/actions/arch-matrix
+        with:
+          arch: ${{ github.event.inputs.arch }}
 
   build:
     needs: [set-matrix, rocm-base]
@@ -112,11 +99,11 @@ jobs:
       arch: ${{ matrix.arch }}
       base-image: ${{ needs.rocm-base.outputs.base-image }}
       migraphx-ref: ${{ github.event_name == 'workflow_dispatch' && inputs.migraphx-ref || 'develop' }}
-      # Nightly means fully floating: pytorch version and ROCm release must be passed as an
-      # explicit empty string, not omitted -- omitting them would inherit build-component.yml's
-      # own default, which used to silently equal the Dockerfile's *pinned* PYTORCH_VERSION
-      # default (v2.13.0) because nothing here ever overrode it. See torch-package-build-decide.sh's
-      # header comment and README.md for the ROCm-10 nightly-discovery background.
+      # Nightly means fully floating: pytorch version and ROCm release must be
+      # passed as an explicit empty string, not omitted -- omitting them would
+      # inherit build-component.yml's own default. See
+      # torch-package-build-decide.sh's header comment and README.md for the
+      # nightly-discovery background.
       pytorch-version: ''
       rocm-release: ''
       use-prebuilt: true

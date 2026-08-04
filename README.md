@@ -73,7 +73,7 @@ build-args differ from nightly's), so tagging them the same as nightly's plain
 them as separate, versioned artifacts.
 
 The `gfx803` tags in these packages are the odd ones out: Polaris can't be
-enumerated by ROCm 7 at all, so they come from `gfx803/Dockerfile.gfx803` on a
+enumerated by ROCm 7 at all, so they come from `gfx803/Dockerfile` on a
 ROCm 6.4.4 base, built by a separate manual workflow. Same tag scheme, different
 stack -- see [gfx803/README.md](gfx803/README.md).
 
@@ -86,7 +86,8 @@ process.
 Both CK (composable_kernel) and rocMLIR are built from source and enabled
 (matching how AMD's own prebuilt images ship), via MIGraphX's own documented
 build tool (`rbuild`) rather than apt packages, which don't line up with what
-MIGraphX's CMake actually requires (see the Dockerfile's comments).
+MIGraphX's CMake actually requires (see `docker/migraphx.Dockerfile` and
+`scripts/build/migraphx.sh`).
 
 ## Nightly ROCm versioning
 
@@ -112,8 +113,8 @@ at all, only pinned version releases (confirmed against `repo.radeon.com`'s
 apt repo: version numbers, alpha/beta/rc, and a `latest` alias that just means
 "newest stable release", nothing rolling). So nightly instead self-builds the
 ROCm base from TheRock's own nightly `.deb` feed
-(`rocm.nightlies.amd.com/packages-multi-arch/deb`) via the Dockerfile's
-`rocm-builder` stage, built and published once (`ghcr.io/<owner>/rocm-builder:latest`
+(`rocm.nightlies.amd.com/packages-multi-arch/deb`) via the `rocm-base` bake
+target, built and published once (`ghcr.io/<owner>/rocm-builder:latest`
 and `:<YYYYMMDD>`) before the per-arch matrix runs, not per-arch -- it's
 arch-independent (`amdrocm-hpc-sdk` covers every gfx target in one package).
 
@@ -124,7 +125,7 @@ Two things worth knowing if you touch this stage:
 - TheRock's `.deb` feed has no `latest` alias either, only dated
   `YYYYMMDD-<run-id>` directories, and the bare index URL serves a stale
   cached snapshot -- a cache-busting query string is required to get the
-  real, current listing (see the Dockerfile comment).
+  real, current listing (see `scripts/build/rocm-base.sh`).
 - The installed package layout differs from AMD's own image: everything lands
   under `/opt/rocm/core-<major.minor>/` with no top-level convenience
   symlinks, and `amdrocm-hpc-sdk` alone doesn't pull HIP's own dev/cmake
@@ -139,7 +140,7 @@ supported-GPU matrix. Those are the archs in `ROCM_ARCH`, the ones built
 nightly, and the only ones worth filing issues against.
 
 There is also an experimental **Polaris / gfx803** variant (RX 460 through RX
-590) built from `gfx803/Dockerfile.gfx803` by a separate manual workflow. It is
+590) built from `gfx803/Dockerfile` by a separate manual workflow. It is
 a different ROCm major on a different base image rather than another arch in
 the matrix, because ROCm 7 removed Polaris support from ROCR-Runtime outright.
 It is verified on an RX 470 8GB but still slow by construction. Everything about it --
@@ -213,7 +214,38 @@ FROM ${BASE_IMAGE}
 RUN python3 -c "import onnxruntime as ort; print(ort.get_available_providers())"
 ```
 
-## Build args
+## Repository layout
+
+The build is a Docker Bake graph, not a single Dockerfile:
+
+```
+docker-bake.hcl          # the build graph: targets, wiring, tags, cache refs,
+                         # and every version-shaped variable. Start here.
+docker/*.Dockerfile      # one file per component (rocm-base, python-base,
+                         # rocblas, migraphx, pytorch, torchvision, torchaudio,
+                         # ort, final). Structure only -- no inline shell.
+scripts/lib/*.sh         # helpers shared across stages (parallel-job sizing,
+                         # the legacy-GCN predicate, the ROCm build env, the
+                         # torch wheel install, the torchvision/torchaudio
+                         # common path)
+scripts/build/*.sh       # one script per non-trivial build step, mounted into
+                         # the stage that runs it
+.github/actions/         # composite actions: runner preparation, arch matrix
+.github/workflows/       # orchestration only; they set bake variables and name
+                         # a target, and contain no build logic
+gfx803/                  # separate ROCm 6.4 build for Polaris, own bake file
+```
+
+Components are wired to each other through Bake *named contexts* rather than
+`COPY --from=$SOME_ARG` indirection stages. Locally each context resolves to the
+in-tree target and one command builds the whole graph; in CI the `WITH_*_IMAGE`
+variables swap individual contexts for already-published component images, so a
+job pulls its dependencies instead of recompiling them.
+
+## Build variables
+
+Set as environment variables for `docker buildx bake`; the workflows set exactly
+the same ones. All are declared, with these defaults, in `docker-bake.hcl`.
 
 - `BASE_IMAGE` (default `ghcr.io/schaka/rocm-builder:latest`) - the ROCm
   base. Defaults to the self-built nightly base (see "Nightly ROCm base
@@ -228,8 +260,8 @@ RUN python3 -c "import onnxruntime as ort; print(ort.get_available_providers())"
   gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;
   gfx1200;gfx1201`) - semicolon-separated `GPU_TARGETS`/`CMAKE_HIP_ARCHITECTURES`/
   `PYTORCH_ROCM_ARCH` list, matching the breadth AMD's own published images
-  build for. Narrow it to your one GPU for a much faster build (quote it if it
-  contains a `;`, e.g. `--build-arg ROCM_ARCH=gfx1201`).
+  build for. Narrow it to your one GPU for a much faster build, e.g.
+  `ROCM_ARCH=gfx1201`.
 - `ROCM_RELEASE` (default empty, `X.Y` e.g. `7.14`) - pins two things
   together: pytorch/torchvision/torchaudio's prebuilt-wheel discovery, and
   (for `gfx900`/`gfx906`/`gfx90c` only) the ROCm line rocBLAS is rebuilt from
@@ -241,11 +273,11 @@ RUN python3 -c "import onnxruntime as ort; print(ort.get_available_providers())"
   can't drift apart.
 - `MIGRAPHX_REF` (default `develop`) - git ref to build MIGraphX from. The
   manual release workflow overrides this to `release/rocm-rel-<version>`.
-- `USE_PREBUILT_PYTORCH` / `USE_PREBUILT_TORCHVISION` / `USE_PREBUILT_TORCHAUDIO`
-  (default `1`) - try AMD's prebuilt wheels first, falling back to a
-  from-source build per-package if none match. `0` forces a full from-source
-  build; the manual release workflow's `use_prebuilt` input sets all three
-  together.
+- `USE_PREBUILT` (default `1`) - try AMD's prebuilt wheels first for
+  pytorch/torchvision/torchaudio, falling back to a from-source build per
+  package if none match. `0` forces a full from-source build. Each of the three
+  is its own bake target, so it can also be overridden for one of them alone
+  (`--set torchaudio.args.USE_PREBUILT=0`).
 - `ORT_VERSION` (default `v1.28.0`) - onnxruntime git tag. Nightly always uses
   this default (never floated, unlike everything else); the manual release
   workflow can override it explicitly.
@@ -266,15 +298,40 @@ RUN python3 -c "import onnxruntime as ort; print(ort.get_available_providers())"
 
 ## Local build
 
+Builds go through Docker Bake, which resolves the whole component graph in one
+command. Requires Buildx (bundled with Docker 23+).
+
 ```
-docker build -t rocm-migraphx-ort-builder .
-# or, for one GPU only (much faster):
-docker build --build-arg ROCM_ARCH=gfx1201 -t rocm-migraphx-ort-builder .
+# one GPU only -- what you almost always want
+ROCM_ARCH=gfx1201 docker buildx bake final
+
+# every arch in the default ROCM_ARCH list
+docker buildx bake final
+
+# just one component, e.g. to iterate on the MIGraphX stage
+ROCM_ARCH=gfx1201 docker buildx bake migraphx
 ```
 
-Expect 30-60+ minutes per target architecture: this builds LLVM (for
-rocMLIR), composable_kernel, ONNX Runtime, and PyTorch from source across
-every architecture in `ROCM_ARCH`.
+Any variable from "Build variables" above can be set the same way, e.g. a local
+reproduction of what the release workflow builds:
+
+```
+ROCM_ARCH=gfx1201 \
+BASE_IMAGE=rocm/dev-ubuntu-26.04:7.14.0-full \
+ROCM_RELEASE=7.14 \
+MIGRAPHX_REF=release/rocm-rel-7.14 \
+RELEASE_TAG=rocm7.14 \
+PYTORCH_VERSION=v2.13.0 \
+  docker buildx bake final
+```
+
+`docker buildx bake --print <target>` renders the fully resolved graph -- tags,
+contexts, build args, cache refs -- without building anything. That is the same
+graph CI builds, so it is the fastest way to check a workflow or bake change.
+
+Expect 30-60+ minutes per target architecture: this builds LLVM (for rocMLIR),
+composable_kernel, ONNX Runtime, and PyTorch from source across every
+architecture in `ROCM_ARCH`.
 
 ## Testing the CI workflow
 

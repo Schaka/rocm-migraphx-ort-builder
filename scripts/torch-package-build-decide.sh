@@ -204,6 +204,91 @@ pytorch_find_stable_release_version() {
     extract_version "$(echo "$matches" | head -1)" "$name_prefix"
 }
 
+# --- Stable-release (repo.amd.com) discovery for the companion packages ---
+#
+# A pinned release build must not ship a devreleases nightly when AMD has already
+# published a real release for that exact ROCm line. Observed before this existed: a build
+# pinned to rocm_version=7.14.0 resolved "torchaudio==2.11.0.2+rocm10.0.0a20260729" -- a
+# ROCm 10.0 nightly -- because the companion paths below only ever looked at
+# RELEASE_INDEX (which is devreleases, NOT repo.amd.com; see those two variables' comments).
+#
+# These are only consulted when the resolved torch is a clean "<ver>+rocm<release>.0" build
+# for this exact ROCm line -- no aYYYYMMDD / rcN / .dev suffix. That is the same reason
+# extract_rocm_datetag finds no date-tag for such a wheel and the date-matching paths below
+# fall through with nothing to pair against.
+#
+# Note this does NOT prove the wheel came from repo.amd.com: the devreleases-snapshot tier
+# also produces "2.13.0+rocm7.14.0"-shaped names. It is deliberately the weaker check, because
+# the property that actually matters for pairing is "same pytorch version, same ROCm line",
+# not which host served it -- and a stable companion is the preferred partner either way. A
+# genuinely bad pairing is still caught downstream by the companion ABI gate, which falls back
+# to a source build.
+stable_torch_version_from_wheel() {
+    local resolved=$1
+    local rocm_release=$2
+    local escaped=${rocm_release//./\\.}
+
+    [ -n "$rocm_release" ] || return 1
+    [ -n "$resolved" ] || return 1
+
+    local version
+    version=$(echo "$resolved" \
+        | sed -nE "s/^torch-([0-9][^+]*)\+rocm${escaped}\.0-.*\.whl$/\1/p")
+    [ -n "$version" ] || return 1
+    echo "$version"
+}
+
+# torchaudio's version tracks torch's 1:1 (2.10.0/2.11.0 on this index sit alongside torch
+# 2.10.0/2.11.0; 2.8.0a0+rocm7.13.0 alongside torch 2.8.0). Ask for that exact pairing rather
+# than "newest stable" -- taking an arbitrary stable build would reintroduce the same
+# mispairing this function exists to prevent, just within one ROCm line instead of across two.
+torchaudio_find_stable_release_version() {
+    local torch_version=$1
+    local rocm_release=$2
+    local base_url="${STABLE_RELEASE_INDEX}torchaudio/"
+
+    log "Checking stable release (repo.amd.com) torchaudio: torch=$torch_version rocm=$rocm_release"
+
+    local matches
+    matches=$(list_wheel_versions "$base_url" "torchaudio-${torch_version}%2Brocm${rocm_release//./\\.}\.0")
+    if [ -z "$matches" ]; then
+        return 1
+    fi
+
+    extract_version "$(echo "$matches" | tail -1)" "torchaudio"
+}
+
+# torchvision does NOT track torch's version; upstream pairs torch 2.N with torchvision
+# 0.(N+15) (2.10->0.25, 2.11->0.26, 2.12->0.27, all confirmed present together on this index).
+# Derive that exact pairing and ask for it specifically; anything unexpected falls through to
+# the existing date-tag path and ultimately to a source build, and the companion ABI gate
+# re-checks the result either way.
+torchvision_find_stable_release_version() {
+    local arch=$1
+    local torch_version=$2
+    local rocm_release=$3
+    local base_url="${STABLE_RELEASE_INDEX}amd-torchvision-device-${arch}/"
+    local name_prefix="amd_torchvision_device_${arch}"
+
+    local torch_minor=${torch_version#*.}
+    torch_minor=${torch_minor%%.*}
+    case "$torch_minor" in
+        ''|*[!0-9]*) log "Cannot derive torchvision version from torch=$torch_version"; return 1 ;;
+    esac
+    local vision_minor=$((torch_minor + 15))
+
+    log "Checking stable release (repo.amd.com) torchvision: $arch torch=$torch_version -> 0.${vision_minor}.x rocm=$rocm_release"
+
+    local matches
+    matches=$(list_wheel_versions "$base_url" \
+        "${name_prefix}-0\.${vision_minor}\.[0-9]+%2Brocm${rocm_release//./\\.}\.0")
+    if [ -z "$matches" ]; then
+        return 1
+    fi
+
+    extract_version "$(echo "$matches" | tail -1)" "$name_prefix"
+}
+
 # torchvision/torchaudio discovery: find a wheel from the SAME build day as pytorch's own
 # resolved version (via its date-tag), not an independently-guessed "latest" -- see file header
 # and extract_rocm_datetag's comment for why (AMD's torchvision index mixes multiple version
@@ -319,6 +404,14 @@ case "$PACKAGE" in
 
     torchvision)
         PKG_NAME="amd-torchvision-device-${ROCM_ARCH}"
+        # Tier 1: a real repo.amd.com release, when torch itself came from there. Must be
+        # tried before the devreleases index below -- see stable_torch_version_from_wheel.
+        if [ "$USE_PREBUILT" = "1" ] && [ -n "$PYTORCH_RESOLVED_VERSION" ] \
+           && STABLE_TORCH_VER=$(stable_torch_version_from_wheel "$PYTORCH_RESOLVED_VERSION" "$ROCM_RELEASE"); then
+            VERSION=$(torchvision_find_stable_release_version "$ROCM_ARCH" "$STABLE_TORCH_VER" "$ROCM_RELEASE") && \
+                { echo "PIP:${PKG_NAME}==${VERSION}:${STABLE_RELEASE_INDEX}"; exit 0; }
+            log "No stable release torchvision on repo.amd.com for torch=${STABLE_TORCH_VER} rocm=${ROCM_RELEASE}"
+        fi
         if [ "$USE_PREBUILT" = "1" ] && [ -n "$PYTORCH_RESOLVED_VERSION" ]; then
             DATETAG=$(extract_rocm_datetag "$PYTORCH_RESOLVED_VERSION")
             if [ -n "$DATETAG" ]; then
@@ -349,6 +442,15 @@ case "$PACKAGE" in
         # immediately building from source like torchvision does -- before finally falling back
         # to SOURCE (ROCm/audio, latest 2.11 patch) only if no wheel exists at all.
         if [ "$USE_PREBUILT" = "1" ]; then
+            # Tier 1: a real repo.amd.com release, when torch itself came from there. This is
+            # the path whose absence let a rocm_version=7.14.0 build resolve a
+            # "+rocm10.0.0a<date>" nightly -- see stable_torch_version_from_wheel.
+            if [ -n "$PYTORCH_RESOLVED_VERSION" ] \
+               && STABLE_TORCH_VER=$(stable_torch_version_from_wheel "$PYTORCH_RESOLVED_VERSION" "$ROCM_RELEASE"); then
+                VERSION=$(torchaudio_find_stable_release_version "$STABLE_TORCH_VER" "$ROCM_RELEASE") && \
+                    { echo "PIP:torchaudio==${VERSION}:${STABLE_RELEASE_INDEX}"; exit 0; }
+                log "No stable release torchaudio on repo.amd.com for torch=${STABLE_TORCH_VER} rocm=${ROCM_RELEASE}"
+            fi
             INDEX=$([ -z "$ROCM_RELEASE" ] && echo "$NIGHTLY_INDEX" || echo "$RELEASE_INDEX")
             BASE_URL="${INDEX}torchaudio/"
             if [ -n "$PYTORCH_RESOLVED_VERSION" ]; then
