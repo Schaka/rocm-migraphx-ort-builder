@@ -29,13 +29,18 @@ runners -- AMD's own `rocm/pytorch` image, which only bakes in 5 archs, is
 builds and pushes one tag per arch (a matrix over `ROCM_ARCH`'s values), rather
 than one fat multi-arch image.
 
-The build is also split by component across separate CI jobs: MIGraphX, PyTorch
-and ONNX Runtime each compile from source on their own runner (each with its
-own ~6h budget -- one monolithic build of all three overran the hosted-runner
+The build is also split by component across separate CI jobs: MIGraphX, PyTorch,
+torchvision, torchaudio and ONNX Runtime each build on their own runner (each
+with its own ~6h budget -- one monolithic build overran the hosted-runner
 ceiling), and each publishes an intermediate image the next job pulls from
 instead of recompiling. MIGraphX and PyTorch are independent and run in
-parallel; ONNX Runtime builds against MIGraphX's `/opt/rocm`; a final job
-assembles all three. Each component lands in its own package:
+parallel; ONNX Runtime builds against MIGraphX's `/opt/rocm`; torchvision and
+torchaudio build against PyTorch's wheel; a final job assembles all of them.
+
+The final job deliberately builds *nothing* -- it only pulls those images and
+installs their wheels. Every component it needs has to be prebuilt, because a
+hosted runner has no disk left to compile one on top of the ~10GB ROCm base the
+job already pulls. Each component lands in its own package:
 
 - `rocm-builder:latest` / `:<YYYYMMDD>` -- the self-built nightly ROCm base
   (see "Nightly ROCm base image" below). Arch-independent, built once before
@@ -46,15 +51,17 @@ assembles all three. Each component lands in its own package:
   rocBLAS themselves
 - `rocm-migraphx-builder:<arch>` -- from-source MIGraphX + ROCm deps in `/opt/rocm`
 - `rocm-migraphx-torch-builder:<arch>` -- PyTorch wheel
+- `rocm-torchvision-builder:<arch>` -- torchvision wheel (built against the PyTorch wheel above)
+- `rocm-torchaudio-builder:<arch>` -- torchaudio wheel (likewise)
 - `rocm-migraphx-ort-builder:<arch>` -- ONNX Runtime wheel (built against MIGraphX)
 - `rocm-migraphx-ort-torch-builder:latest-<arch>` / `:<YYYYMMDD>-<arch>` -- the
-  combined image, all three installed
+  combined image, everything installed
 
 All but the last two are build plumbing (each an incomplete slice of the
 stack); downstream consumers want the combined `rocm-migraphx-ort-torch-builder`.
 
 A **manual release build** (see "Manual release build" below) tags every
-component differently: `rocblas`/`migraphx`/`pytorch`/`ort` each publish as
+component differently: `rocblas`/`migraphx`/`pytorch`/`torchvision`/`torchaudio`/`ort` each publish as
 `<arch>-rocm<version>` (e.g. `gfx1201-rocm7.14`) instead of the nightly
 scheme's plain `<arch>`, and the combined image publishes as
 `rocm<version>-<arch>` (e.g. `rocm7.14-gfx1201`) instead of `latest-<arch>`/
@@ -283,7 +290,8 @@ or via the Actions tab -> "Nightly build" -> "Run workflow", filling in the
 `arch` input. Leaving it empty runs the full matrix, same as the schedule.
 A single-arch run still builds the shared `rocm-builder` base first (once,
 not per-arch, see "Nightly ROCm base image" above), then fans out to the
-four per-arch component builds (migraphx, pytorch, ort, final) for that arch,
+per-arch component builds (migraphx, pytorch, torchvision, torchaudio, ort,
+final) for that arch,
 via the reusable `build-pipeline.yml` workflow (which in turn calls
 `build-component.yml` per component). The `debug` input opens a detached
 tmate SSH session into the runner for the build's duration (manual runs

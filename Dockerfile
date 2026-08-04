@@ -655,12 +655,15 @@ ENV PATH=/build-venv/bin:$PATH
 
 # torchvision: try prebuilt per-arch wheel first, fallback to source build from pytorch/vision.
 # Requires pytorch installed for setup.py (source path) -- install the pytorch wheel first.
-# See the pytorch-builder stage above for the PIP:/SOURCE: decision format. The dist dir may
-# also contain a non-.whl sdist (e.g. the `rocm` metapackage, when USE_PREBUILT_PYTORCH=1
-# pulled in TheRock's rocm-sdk-* deps) -- copy the whole dir, not just *.whl, and pass
-# --find-links so pip/uv can resolve that dependency locally instead of hitting PyPI for it.
+# See the pytorch-builder stage above for the PIP:/SOURCE: decision format.
+#
+# pytorch's dist dir is bind-mounted at /wheels-torch by each RUN that needs it, not COPYed in:
+# torch's wheel alone is ~1.7GB, and a COPY would commit it as a layer of this stage's published
+# image, which the final stage then has to pull for nothing (it mounts pytorch-export directly).
+# The whole directory is exposed, not just *.whl -- it may also hold a non-.whl sdist (e.g. the
+# `rocm` metapackage, when USE_PREBUILT_PYTORCH=1 pulled in TheRock's rocm-sdk-* deps) -- and
+# --find-links points at it so pip/uv resolves that dependency locally instead of hitting PyPI.
 # --from=pytorch-export (not pytorch-builder directly) -- see that alias's own comment above.
-COPY --from=pytorch-export /pytorch/dist/* /tmp/torch/
 COPY scripts/torch-package-build-decide.sh scripts/generate-torch-constraints.sh /tmp/
 
 # --no-deps + the explicit package list: pytorch-builder's devreleases-snapshot fallback (see
@@ -670,25 +673,26 @@ COPY scripts/torch-package-build-decide.sh scripts/generate-torch-constraints.sh
 # which nightly snapshot the file actually is) -- letting pip re-resolve dependencies here
 # would re-check that pin and fail again. The named packages are torch's own ordinary,
 # non-ROCm-pinned runtime deps (harmless to (re-)request explicitly on every path: satisfied
-# instantly from the local wheels /tmp/torch already has when the PIP or SNAPSHOT tier
+# instantly from the local wheels the mounted dist dir already has when the PIP or SNAPSHOT tier
 # fetched them, or pulled fresh from PyPI when SOURCE build didn't).
 # The rocm-wheel-fetch/snapshot tiers can also produce a non-.whl sdist (the `rocm`
 # metapackage itself, when devreleases had no clean release for it) -- torch's own
 # _rocm_init.py imports the `rocm_sdk` module that sdist provides, so it must be installed
 # too, not just the *.whl glob. --no-build-isolation: its build backend is already present
 # (setuptools, installed just above) -- no need to let pip fetch one from the network.
-RUN LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /build-venv/bin/python3 --no-deps \
-        --find-links /tmp/torch \
+RUN --mount=type=bind,from=pytorch-export,source=/pytorch/dist,target=/wheels-torch \
+    LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /build-venv/bin/python3 --no-deps \
+        --find-links /wheels-torch \
         filelock typing_extensions sympy networkx jinja2 fsspec mpmath MarkupSafe setuptools \
-        /tmp/torch/*.whl && \
-    if ls /tmp/torch/*.tar.gz >/dev/null 2>&1; then \
+        /wheels-torch/*.whl && \
+    if ls /wheels-torch/*.tar.gz >/dev/null 2>&1; then \
         LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /build-venv/bin/python3 --no-deps \
-            --no-build-isolation --find-links /tmp/torch /tmp/torch/*.tar.gz; \
+            --no-build-isolation --find-links /wheels-torch /wheels-torch/*.tar.gz; \
     fi && \
     chmod +x /tmp/torch-package-build-decide.sh /tmp/generate-torch-constraints.sh && \
     mkdir -p /torchvision/dist && \
-    PYTORCH_RESOLVED=$(basename $(ls /tmp/torch/torch-*.whl | head -1)) && \
-    /tmp/generate-torch-constraints.sh /tmp/torch > /tmp/torch-constraints.txt && \
+    PYTORCH_RESOLVED=$(basename $(ls /wheels-torch/torch-*.whl | head -1)) && \
+    /tmp/generate-torch-constraints.sh /wheels-torch > /tmp/torch-constraints.txt && \
     DECISION=$(/tmp/torch-package-build-decide.sh torchvision "${PYTORCH_VERSION}" "${ROCM_ARCH}" "${USE_PREBUILT_TORCHVISION}" "${ROCM_RELEASE}" "${PYTORCH_RESOLVED}") && \
     if echo "$DECISION" | grep -q '^PIP:'; then \
         REST="${DECISION#PIP:}" && \
@@ -696,7 +700,7 @@ RUN LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /buil
         INDEX_URL="${REST#*:}" && \
         echo "Downloading prebuilt torchvision: $PKG_SPEC from $INDEX_URL" && \
         /build-venv/bin/pip download "$PKG_SPEC" --constraint /tmp/torch-constraints.txt \
-            --find-links /tmp/torch --index-url "$INDEX_URL" -d /torchvision/dist/; \
+            --find-links /wheels-torch --index-url "$INDEX_URL" -d /torchvision/dist/; \
     else \
         REST="${DECISION#SOURCE:}" && \
         REPO="${REST%%:*}" && \
@@ -715,8 +719,9 @@ RUN LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /buil
 # wheel pins an exact matching torch build; if pytorch-builder resolved a different one) would
 # otherwise only surface as a runtime ImportError in whatever downstream app imports torchvision
 # first. Fail the build here instead, where it's obvious which stage/arch is at fault.
-RUN LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /build-venv/bin/python3 \
-        --find-links /tmp/torch --find-links /torchvision/dist /torchvision/dist/*.whl && \
+RUN --mount=type=bind,from=pytorch-export,source=/pytorch/dist,target=/wheels-torch \
+    LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /build-venv/bin/python3 \
+        --find-links /wheels-torch --find-links /torchvision/dist /torchvision/dist/*.whl && \
     LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH /build-venv/bin/python3 -c \
         "import torch; import torchvision; print('torchvision', torchvision.__version__, 'OK against torch', torch.__version__)"
 
@@ -741,25 +746,25 @@ ENV PATH=/build-venv/bin:$PATH
 # per-gfx) -- try prebuilt first same as pytorch/torchvision, source build (ROCm/audio) only
 # when no matching wheel exists.
 # Requires pytorch installed first (torchaudio setup.py imports torch). See torchvision-builder
-# above for why the dist dir is copied whole and --find-links is passed (non-.whl sdist dep),
-# and for --no-deps + the explicit package list (pytorch-builder's devreleases-snapshot
-# fallback's declared pins don't match what was actually downloaded).
+# above for why pytorch's dist dir is bind-mounted whole and --find-links points at it (non-.whl
+# sdist dep), and for --no-deps + the explicit package list (pytorch-builder's
+# devreleases-snapshot fallback's declared pins don't match what was actually downloaded).
 # --from=pytorch-export (not pytorch-builder directly) -- see that alias's own comment above.
-COPY --from=pytorch-export /pytorch/dist/* /tmp/torch/
 COPY scripts/torch-package-build-decide.sh scripts/generate-torch-constraints.sh /tmp/
 
-RUN LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /build-venv/bin/python3 --no-deps \
-        --find-links /tmp/torch \
+RUN --mount=type=bind,from=pytorch-export,source=/pytorch/dist,target=/wheels-torch \
+    LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /build-venv/bin/python3 --no-deps \
+        --find-links /wheels-torch \
         filelock typing_extensions sympy networkx jinja2 fsspec mpmath MarkupSafe setuptools \
-        /tmp/torch/*.whl && \
-    if ls /tmp/torch/*.tar.gz >/dev/null 2>&1; then \
+        /wheels-torch/*.whl && \
+    if ls /wheels-torch/*.tar.gz >/dev/null 2>&1; then \
         LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /build-venv/bin/python3 --no-deps \
-            --no-build-isolation --find-links /tmp/torch /tmp/torch/*.tar.gz; \
+            --no-build-isolation --find-links /wheels-torch /wheels-torch/*.tar.gz; \
     fi && \
     chmod +x /tmp/torch-package-build-decide.sh /tmp/generate-torch-constraints.sh && \
     mkdir -p /torchaudio/dist && \
-    PYTORCH_RESOLVED=$(basename $(ls /tmp/torch/torch-*.whl | head -1)) && \
-    /tmp/generate-torch-constraints.sh /tmp/torch > /tmp/torch-constraints.txt && \
+    PYTORCH_RESOLVED=$(basename $(ls /wheels-torch/torch-*.whl | head -1)) && \
+    /tmp/generate-torch-constraints.sh /wheels-torch > /tmp/torch-constraints.txt && \
     DECISION=$(/tmp/torch-package-build-decide.sh torchaudio "${PYTORCH_VERSION}" "" "${USE_PREBUILT_TORCHAUDIO}" "${ROCM_RELEASE}" "${PYTORCH_RESOLVED}") && \
     if echo "$DECISION" | grep -q '^PIP:'; then \
         REST="${DECISION#PIP:}" && \
@@ -767,7 +772,7 @@ RUN LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /buil
         INDEX_URL="${REST#*:}" && \
         echo "Downloading prebuilt torchaudio: $PKG_SPEC from $INDEX_URL" && \
         /build-venv/bin/pip download "$PKG_SPEC" --constraint /tmp/torch-constraints.txt \
-            --find-links /tmp/torch --index-url "$INDEX_URL" -d /torchaudio/dist/; \
+            --find-links /wheels-torch --index-url "$INDEX_URL" -d /torchaudio/dist/; \
     else \
         REST="${DECISION#SOURCE:}" && \
         REPO="${REST%%:*}" && \
@@ -783,8 +788,9 @@ RUN LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /buil
 
 # Build-time ABI check, same reasoning as torchvision-builder's: torch and torchaudio are
 # resolved independently, verify they actually load together before shipping.
-RUN LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /build-venv/bin/python3 \
-        --find-links /tmp/torch --find-links /torchaudio/dist /torchaudio/dist/*.whl && \
+RUN --mount=type=bind,from=pytorch-export,source=/pytorch/dist,target=/wheels-torch \
+    LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /build-venv/bin/python3 \
+        --find-links /wheels-torch --find-links /torchaudio/dist /torchaudio/dist/*.whl && \
     LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH /build-venv/bin/python3 -c \
         "import torch; import torchaudio; print('torchaudio', torchaudio.__version__, 'OK against torch', torch.__version__)"
 
@@ -907,11 +913,17 @@ RUN uv venv $VIRTUAL_ENV --python 3.12 --seed
 # Keeping torch out of $VIRTUAL_ENV entirely means classic-stack consumers
 # never see it importable, so that opportunistic import just ImportErrors
 # harmlessly instead of loading a second comgr/LLVM.
-COPY --from=ort-export /onnxruntime/dist/*.whl /tmp/wheels-ort/
-RUN uv pip install --python "$VIRTUAL_ENV/bin/python3" --no-cache --no-deps --find-links /tmp/wheels-ort \
+#
+# Wheels arrive on a bind mount rather than via COPY: a COPY writes them into
+# this image's own filesystem and commits a layer, and no later `rm -rf` can
+# un-commit it, so the wheels would ship inside the published image (several GB
+# of them, between this install and the torch one below). A bind mount exposes
+# the source stage's directory read-only for the duration of the RUN and
+# contributes nothing to the layer -- only what pip actually installs is kept.
+RUN --mount=type=bind,from=ort-export,source=/onnxruntime/dist,target=/wheels-ort \
+    uv pip install --python "$VIRTUAL_ENV/bin/python3" --no-cache --no-deps --find-links /wheels-ort \
         numpy flatbuffers packaging protobuf \
-        /tmp/wheels-ort/*.whl \
-    && rm -rf /tmp/wheels-ort \
+        /wheels-ort/*.whl \
     && "$VIRTUAL_ENV/bin/python3" -c "import onnxruntime as ort; p=ort.get_available_providers(); print('ORT providers:', p); assert 'MIGraphXExecutionProvider' in p" \
     && "$VIRTUAL_ENV/bin/python3" -c "import migraphx; print('migraphx python module OK')"
 
@@ -922,21 +934,24 @@ RUN uv pip install --python "$VIRTUAL_ENV/bin/python3" --no-cache --no-deps --fi
 ENV VIRTUAL_ENV_TORCH=/opt/venv-torch
 RUN uv venv $VIRTUAL_ENV_TORCH --python 3.12 --seed
 
-COPY --from=pytorch-export /pytorch/dist/* /tmp/wheels-torch/
-COPY --from=torchvision-export /torchvision/dist/* /tmp/wheels-torch/
-COPY --from=torchaudio-export /torchaudio/dist/* /tmp/wheels-torch/
-# All three dist dirs land in ONE shared directory (not three separate ones): pytorch,
-# torchvision, and torchaudio's independent `pip download` calls each pull their own copy of
-# shared transitive deps (filelock, jinja2, sympy, etc.) from the same index -- byte-identical
-# content, but if left in separate directories, uv's resolver sees the same package name at two
-# different local file:// paths and errors with "conflicting URLs" instead of just picking one.
+# The three dist dirs are bind-mounted read-only (same layer-size reasoning as the onnxruntime
+# install above), then merged into ONE shared directory before installing -- not passed as three
+# separate --find-links: pytorch, torchvision, and torchaudio's independent `pip download` calls
+# each pull their own copy of shared transitive deps (filelock, jinja2, sympy, etc.) from the same
+# index -- byte-identical content, but seen at two different local file:// paths uv's resolver
+# errors with "conflicting URLs" instead of just picking one.
+#
+# The merge target is a cache mount, so the merged copy is likewise absent from the image. It is
+# emptied on entry and on exit: a cache mount persists between builds on the same builder, and
+# stale wheels left in it would be picked up by the */*.whl globs below on a later, differently
+# resolved build.
 #
 # --no-deps + the explicit package list, same reasoning as torchvision-builder/torchaudio-
 # builder's own installs above: pytorch-builder's devreleases-snapshot fallback can produce
 # wheels whose declared Requires-Dist pins don't match what was actually downloaded, so pip's
 # normal resolver can't be trusted to re-verify them here. The named packages cover every
 # wheel's own ordinary, non-ROCm-pinned runtime deps (torch's numpy + torchvision's pillow) --
-# satisfied instantly from /tmp/wheels-torch when already present, pulled fresh from PyPI
+# satisfied instantly from the merged wheel dir when already present, pulled fresh from PyPI
 # otherwise.
 #
 # rocm_sdk_core's presence in the collected wheels is the tell for which tier actually fired:
@@ -946,7 +961,13 @@ COPY --from=torchaudio-export /torchaudio/dist/* /tmp/wheels-torch/
 # it carries none of that risk -- safe to ALSO install into $VIRTUAL_ENV, restoring the
 # zero-friction "torch just works from the default python3" behavior for whichever nightly runs
 # happen to fall back to it, without reintroducing the crash on runs that resolve the PIP wheel.
-RUN uv pip install --python "$VIRTUAL_ENV_TORCH/bin/python3" --no-cache --no-deps --find-links /tmp/wheels-torch \
+RUN --mount=type=bind,from=pytorch-export,source=/pytorch/dist,target=/wheels-src/pytorch \
+    --mount=type=bind,from=torchvision-export,source=/torchvision/dist,target=/wheels-src/torchvision \
+    --mount=type=bind,from=torchaudio-export,source=/torchaudio/dist,target=/wheels-src/torchaudio \
+    --mount=type=cache,target=/tmp/wheels-torch,sharing=locked,id=final-wheels-torch \
+    rm -rf /tmp/wheels-torch/* \
+    && cp /wheels-src/pytorch/* /wheels-src/torchvision/* /wheels-src/torchaudio/* /tmp/wheels-torch/ \
+    && uv pip install --python "$VIRTUAL_ENV_TORCH/bin/python3" --no-cache --no-deps --find-links /tmp/wheels-torch \
         numpy filelock typing_extensions sympy networkx jinja2 fsspec mpmath MarkupSafe \
         setuptools pillow \
         /tmp/wheels-torch/*.whl \
@@ -972,6 +993,6 @@ RUN uv pip install --python "$VIRTUAL_ENV_TORCH/bin/python3" --no-cache --no-dep
         && "$VIRTUAL_ENV/bin/python3" -c "import torch; print('torch', torch.__version__, 'HIP built:', torch.version.hip, '(merged into main venv)')" \
         && "$VIRTUAL_ENV/bin/python3" -c "import onnxruntime as ort; p=ort.get_available_providers(); assert 'MIGraphXExecutionProvider' in p, 'MIGraphX EP lost after merging torch into main venv'; print('MIGraphX EP intact after merge:', p)"; \
     fi \
-    && rm -rf /tmp/wheels-torch
+    && rm -rf /tmp/wheels-torch/*
 
 ENV PATH="$VIRTUAL_ENV/bin:${PATH}"

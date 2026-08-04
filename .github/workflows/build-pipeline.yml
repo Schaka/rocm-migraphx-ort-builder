@@ -1,8 +1,15 @@
 name: Build pipeline (single arch)
 
-# Runs the full [rocblas ->] migraphx -> ort -> final chain (plus the pytorch
-# build, which only depends on rocblas) for ONE arch. Called once per arch from
-# a matrix in nightly.yml. The rocblas job only exists for gfx900/gfx906/gfx90c.
+# Runs the full [rocblas ->] migraphx -> ort -> final chain for ONE arch, plus
+# the parallel [rocblas ->] pytorch -> {torchvision, torchaudio} -> final chain,
+# which is independent of MIGraphX. Called once per arch from a matrix in
+# nightly.yml. The rocblas job only exists for gfx900/gfx906/gfx90c.
+#
+# Every component the `final` job needs is published as its own image by its own
+# job, so `final` itself only pulls images and installs wheels -- it compiles
+# nothing. That is load-bearing, not incidental: a hosted runner does not have
+# the disk for `final` to build any of these stages itself on top of the
+# ~10GB ROCm base it already has to pull.
 #
 # This exists because `needs` in GitHub Actions is job-level, not
 # matrix-cell-level: if migraphx/ort/final were each their own matrixed job
@@ -118,6 +125,64 @@ jobs:
       use-prebuilt: ${{ inputs.use-prebuilt }}
       debug: ${{ inputs.debug }}
 
+  # torchvision and torchaudio each need a working torch to build/verify
+  # against, so they hang off the pytorch job and consume its published image
+  # rather than rebuilding it. They used to have no jobs at all: the Dockerfile
+  # ARGs TORCHVISION_IMAGE/TORCHAUDIO_IMAGE were never passed by
+  # build-component.yml, so their default (the in-tree stage name) won, and the
+  # `final` job silently built BOTH stages itself -- two extra toolchain
+  # installs, two more copies of the ~1.7GB torch wheel installed into throwaway
+  # build venvs, and a second `pip download` of torch on top. That is what was
+  # exhausting the runner's disk in the final component. As their own jobs they
+  # run on their own runners, with their own disk, and `final` just pulls the
+  # results.
+  #
+  # Matrixed per-arch like everything else even though torchaudio's wheel is
+  # arch-independent (see the Dockerfile stage's own comment): the pipeline
+  # itself is per-arch, and this is no more work than the per-arch rebuild that
+  # was already happening inside `final`.
+  torchvision:
+    needs: pytorch
+    if: ${{ !cancelled() && needs.pytorch.result == 'success' }}
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build-component.yml
+    secrets: inherit
+    with:
+      arch: ${{ inputs.arch }}
+      component: torchvision
+      target: torchvision-builder
+      with-rocblas-image: ${{ inputs.arch == 'gfx900' || inputs.arch == 'gfx906' || inputs.arch == 'gfx90c' }}
+      with-pytorch-image: true
+      release-tag: ${{ inputs.release-tag }}
+      base-image: ${{ inputs.base-image }}
+      pytorch-version: ${{ inputs.pytorch-version }}
+      rocm-release: ${{ inputs.rocm-release }}
+      use-prebuilt: ${{ inputs.use-prebuilt }}
+      debug: ${{ inputs.debug }}
+
+  torchaudio:
+    needs: pytorch
+    if: ${{ !cancelled() && needs.pytorch.result == 'success' }}
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build-component.yml
+    secrets: inherit
+    with:
+      arch: ${{ inputs.arch }}
+      component: torchaudio
+      target: torchaudio-builder
+      with-rocblas-image: ${{ inputs.arch == 'gfx900' || inputs.arch == 'gfx906' || inputs.arch == 'gfx90c' }}
+      with-pytorch-image: true
+      release-tag: ${{ inputs.release-tag }}
+      base-image: ${{ inputs.base-image }}
+      pytorch-version: ${{ inputs.pytorch-version }}
+      rocm-release: ${{ inputs.rocm-release }}
+      use-prebuilt: ${{ inputs.use-prebuilt }}
+      debug: ${{ inputs.debug }}
+
   ort:
     needs: migraphx
     if: ${{ !cancelled() && needs.migraphx.result == 'success' }}
@@ -139,8 +204,8 @@ jobs:
       debug: ${{ inputs.debug }}
 
   final:
-    needs: [pytorch, ort]
-    if: ${{ !cancelled() && needs.pytorch.result == 'success' && needs.ort.result == 'success' }}
+    needs: [pytorch, torchvision, torchaudio, ort]
+    if: ${{ !cancelled() && needs.pytorch.result == 'success' && needs.torchvision.result == 'success' && needs.torchaudio.result == 'success' && needs.ort.result == 'success' }}
     permissions:
       contents: read
       packages: write
@@ -150,9 +215,17 @@ jobs:
       arch: ${{ inputs.arch }}
       component: final
       final: true
+      # Every component this stage needs arrives prebuilt -- with
+      # torchvision/torchaudio now included, the job pulls images and installs
+      # wheels and compiles nothing at all, hence swap-size-gb: 0 (see that
+      # input's description: the swapfile is otherwise 16GB of the root disk
+      # this stage kept running out of).
       with-migraphx-image: true
       with-pytorch-image: true
+      with-torchvision-image: true
+      with-torchaudio-image: true
       with-ort-image: true
+      swap-size-gb: 0
       migraphx-ref: ${{ inputs.migraphx-ref }}
       release-tag: ${{ inputs.release-tag }}
       base-image: ${{ inputs.base-image }}

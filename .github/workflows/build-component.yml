@@ -1,7 +1,8 @@
 name: Build component
 
 # Reusable single-component build. Called once per component per arch by
-# nightly.yml, so rocblas / migraphx / pytorch / ort / final each run as their own job on
+# nightly.yml, so rocblas / migraphx / pytorch / torchvision / torchaudio / ort /
+# final each run as their own job on
 # their own fresh runner with their own 360-minute budget, instead of all
 # racing a single 6h ceiling in one monolithic build. Each component pushes an
 # intermediate image (ghcr .../:<component>-<arch>) that the jobs downstream of
@@ -15,7 +16,7 @@ on:
         required: true
         type: string
       component:
-        description: 'Component name -- drives the image tag and cache ref (rocblas|migraphx|pytorch|ort|final)'
+        description: 'Component name -- drives the image tag and cache ref (rocblas|migraphx|pytorch|torchvision|torchaudio|ort|final)'
         required: true
         type: string
       target:
@@ -43,11 +44,26 @@ on:
         required: false
         type: boolean
         default: false
+      with-torchvision-image:
+        description: 'Pass TORCHVISION_IMAGE so this build COPYs from the prebuilt torchvision image'
+        required: false
+        type: boolean
+        default: false
+      with-torchaudio-image:
+        description: 'Pass TORCHAUDIO_IMAGE so this build COPYs from the prebuilt torchaudio image'
+        required: false
+        type: boolean
+        default: false
       with-ort-image:
         description: 'Pass ORT_IMAGE so this build COPYs from the prebuilt ort image'
         required: false
         type: boolean
         default: false
+      swap-size-gb:
+        description: 'Size of the swapfile to add, in GB. 0 skips the swapfile entirely AND lets the disk-cleanup step reclaim the runner''s own preinstalled swap -- for jobs that only pull images and install wheels, where a swapfile is 16GB+ of root-disk space spent on memory headroom nothing needs.'
+        required: false
+        type: number
+        default: 16
       migraphx-ref:
         description: 'Git ref to build MIGraphX from (branch/tag). "develop" (default) keeps the normal nightly tag scheme; any other ref suffixes the migraphx/ort/final image tags with it so a pinned build does not collide with the develop-tracking one.'
         required: false
@@ -112,24 +128,33 @@ jobs:
       # only 5 archs, runs ~54GB uncompressed -- past the ~14GB disk hosted
       # runners ship with, even after cleanup. Building/tagging one image per
       # arch instead keeps each job's disk footprint to a single arch's worth
-      # of kernel binaries. swap-storage: false leaves the runner's swap in
-      # place (the action removes it by default) as a memory-pressure safety net
-      # for the compile stages.
+      # of kernel binaries. swap-storage is kept (the action removes it by
+      # default) as a memory-pressure safety net for the compile stages -- but
+      # swap is root-disk space, so a job declaring swap-size-gb: 0 (i.e. one
+      # that compiles nothing, see that input's description) hands it back.
       - name: Free disk space
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
           tool-cache: true
           docker-images: true
-          swap-storage: false
+          swap-storage: ${{ inputs.swap-size-gb == 0 }}
           android: true
           dotnet: true
           haskell: true
           large-packages: true
 
+      # Report what's actually available before the build starts: when a build
+      # does fail on space, the log otherwise gives no baseline to compare the
+      # failure against.
+      - name: Report free disk space
+        run: df -h / /mnt
+
+      # Skipped entirely when swap-size-gb is 0 -- see that input's description.
       - name: Set swap space
+        if: inputs.swap-size-gb != 0
         uses: pierotofy/set-swap-space@master
         with:
-          swap-size-gb: 16
+          swap-size-gb: ${{ inputs.swap-size-gb }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -161,11 +186,13 @@ jobs:
           owner="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
           pkg() {
             case "$1" in
-              rocblas)  echo "${owner}/rocm-rocblas-builder" ;;
-              migraphx) echo "${owner}/rocm-migraphx-builder" ;;
-              pytorch)  echo "${owner}/rocm-migraphx-torch-builder" ;;
-              ort)      echo "${owner}/rocm-migraphx-ort-builder" ;;
-              final)    echo "${owner}/rocm-migraphx-ort-torch-builder" ;;
+              rocblas)     echo "${owner}/rocm-rocblas-builder" ;;
+              migraphx)    echo "${owner}/rocm-migraphx-builder" ;;
+              pytorch)     echo "${owner}/rocm-migraphx-torch-builder" ;;
+              torchvision) echo "${owner}/rocm-torchvision-builder" ;;
+              torchaudio)  echo "${owner}/rocm-torchaudio-builder" ;;
+              ort)         echo "${owner}/rocm-migraphx-ort-builder" ;;
+              final)       echo "${owner}/rocm-migraphx-ort-torch-builder" ;;
             esac
           }
           arch="${{ inputs.arch }}"
@@ -182,7 +209,9 @@ jobs:
           # of migraphx-ref, and doesn't need rebuilding per-ref. rocBLAS is
           # upstream of migraphx and equally independent of its ref, so it's
           # exempt too -- a pinned-ref (nightly, develop-tracking-migraphx-only)
-          # run reuses the same rocBLAS/pytorch image.
+          # run reuses the same rocBLAS/pytorch image. torchvision/torchaudio
+          # build against pytorch and never touch MIGraphX at all, so they're
+          # exempt for exactly the same reason pytorch is.
           #
           # A manual release build is a different case entirely: release_tag
           # (e.g. "rocm7.14") applies to EVERY component, including pytorch and
@@ -199,7 +228,9 @@ jobs:
           suffix=""
           if [ -n "$release_tag" ]; then
             suffix="-${release_tag}"
-          elif [ "$component" != "pytorch" ] && [ "$component" != "rocblas" ] && [ "$ref" != "develop" ]; then
+          elif [ "$ref" != "develop" ] \
+               && [ "$component" != "pytorch" ] && [ "$component" != "rocblas" ] \
+               && [ "$component" != "torchvision" ] && [ "$component" != "torchaudio" ]; then
             suffix="-$(echo "$ref" | tr -sc 'A-Za-z0-9' '-' | sed 's/^-*//;s/-*$//')"
           fi
           tag_arch="${arch}${suffix}"
@@ -221,6 +252,12 @@ jobs:
             fi
             if [ "${{ inputs.with-pytorch-image }}" = "true" ]; then
               echo "PYTORCH_IMAGE=$(pkg pytorch):${tag_arch}"
+            fi
+            if [ "${{ inputs.with-torchvision-image }}" = "true" ]; then
+              echo "TORCHVISION_IMAGE=$(pkg torchvision):${tag_arch}"
+            fi
+            if [ "${{ inputs.with-torchaudio-image }}" = "true" ]; then
+              echo "TORCHAUDIO_IMAGE=$(pkg torchaudio):${tag_arch}"
             fi
             if [ "${{ inputs.with-ort-image }}" = "true" ]; then
               echo "ORT_IMAGE=$(pkg ort):${arch}${suffix}"
@@ -270,18 +307,21 @@ jobs:
             echo "tags=${self}:${tag_arch}" >> "$GITHUB_OUTPUT"
           fi
 
-          echo "cache-ref=${self}:cache-${tag_arch}" >> "$GITHUB_OUTPUT"
-
-          # final's cache is never consumed downstream (nothing builds FROM the
-          # final image), so mode=max there just re-exports every inherited
-          # layer as a cache blob for no benefit -- pure disk pressure on the
-          # runner during the export step, which is exactly where these builds
-          # have been running out of space. mode=min only exports the layers
-          # unique to this build.
+          # final exports no cache at all, and consequently reads none either.
+          # Nothing builds FROM the final image, so its cache has no consumer;
+          # and every expensive component it needs arrives as a prebuilt image
+          # (see build-pipeline.yml), leaving it nothing but image pulls and a
+          # few wheel installs -- cheap to redo on a retry. Exporting anyway
+          # costs a second compressed copy of every layer unique to the build,
+          # written to the same nearly-full runner disk. cache-from without a
+          # cache-to would only ever 404, hence both empty.
           if [ "${{ inputs.final }}" = "true" ]; then
-            echo "cache-mode=min" >> "$GITHUB_OUTPUT"
+            echo "cache-from=" >> "$GITHUB_OUTPUT"
+            echo "cache-to=" >> "$GITHUB_OUTPUT"
           else
-            echo "cache-mode=max" >> "$GITHUB_OUTPUT"
+            cache_ref="${self}:cache-${tag_arch}"
+            echo "cache-from=type=registry,ref=${cache_ref}" >> "$GITHUB_OUTPUT"
+            echo "cache-to=type=registry,ref=${cache_ref},mode=max" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Build and push image
@@ -292,5 +332,9 @@ jobs:
           target: ${{ inputs.target }}
           tags: ${{ steps.meta.outputs.tags }}
           build-args: ${{ steps.meta.outputs.build-args }}
-          cache-from: type=registry,ref=${{ steps.meta.outputs.cache-ref }}
-          cache-to: type=registry,ref=${{ steps.meta.outputs.cache-ref }},mode=${{ steps.meta.outputs.cache-mode }}
+          cache-from: ${{ steps.meta.outputs.cache-from }}
+          cache-to: ${{ steps.meta.outputs.cache-to }}
+          # Nothing consumes the provenance attestation, and producing it turns
+          # every push into an index with a second, attestation-only manifest.
+          # Off publishes a plain single-platform manifest instead.
+          provenance: false
