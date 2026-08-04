@@ -38,12 +38,15 @@ jobs:
       - name: Resolve bake graph
         run: |
           set -euo pipefail
-          targets="rocm-base python-base rocblas migraphx pytorch torchvision torchaudio ort final"
+          # An array, not a space-separated string: the word splitting is wanted
+          # here (one argument per target), and "${targets[@]}" expresses that
+          # without leaving an unquoted expansion for shellcheck to flag.
+          targets=(rocm-base python-base rocblas migraphx pytorch torchvision torchaudio ort final)
 
           echo "::group::nightly variables"
           ROCM_ARCH=gfx1201 DATE=20260101 SOURCE_DATE=20260101 \
           REGISTRY_CACHE=true CACHE_TARGET=migraphx \
-            docker buildx bake --print $targets
+            docker buildx bake --print "${targets[@]}"
           echo "::endgroup::"
 
           echo "::group::release variables"
@@ -52,7 +55,7 @@ jobs:
           PYTORCH_VERSION=v2.13.0 USE_PREBUILT=0 \
           WITH_ROCBLAS_IMAGE=true WITH_MIGRAPHX_IMAGE=true WITH_PYTORCH_IMAGE=true \
           WITH_TORCHVISION_IMAGE=true WITH_TORCHAUDIO_IMAGE=true WITH_ORT_IMAGE=true \
-            docker buildx bake --print $targets
+            docker buildx bake --print "${targets[@]}"
           echo "::endgroup::"
 
       # Every stage's real logic lives in these, so a typo here is a typo in the

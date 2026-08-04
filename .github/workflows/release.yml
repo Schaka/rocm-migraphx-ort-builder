@@ -69,21 +69,31 @@ jobs:
     steps:
       - name: Parse ROCm version into release tag and refs
         id: parse
+        # Inputs arrive via env, not interpolated into the script body: a
+        # ${{ inputs.* }} expansion is pasted in as literal text before bash ever
+        # sees it, so a crafted dispatch input would run as code here.
+        env:
+          ROCM_VERSION: ${{ inputs.rocm_version }}
+          MIGRAPHX_REF_INPUT: ${{ inputs.migraphx_ref }}
         run: |
-          ver="${{ inputs.rocm_version }}"
+          ver="$ROCM_VERSION"
           major_minor="$(echo "$ver" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')"
           if [ "$major_minor" = "$ver" ]; then
             echo "rocm_version '${ver}' doesn't match X.Y or X.Y.Z" >&2
             exit 1
           fi
-          if [ -n "${{ inputs.migraphx_ref }}" ]; then
-            echo "migraphx-ref=${{ inputs.migraphx_ref }}" >> "$GITHUB_OUTPUT"
+          if [ -n "$MIGRAPHX_REF_INPUT" ]; then
+            migraphx_ref="$MIGRAPHX_REF_INPUT"
           else
-            echo "migraphx-ref=release/rocm-rel-${major_minor}" >> "$GITHUB_OUTPUT"
+            migraphx_ref="release/rocm-rel-${major_minor}"
           fi
-          echo "release-tag=rocm${major_minor}" >> "$GITHUB_OUTPUT"
-          echo "base-image=rocm/dev-ubuntu-26.04:${ver}-full" >> "$GITHUB_OUTPUT"
-          echo "rocm-release=${major_minor}" >> "$GITHUB_OUTPUT"
+          # One grouped redirect rather than five appends to the same file.
+          {
+            echo "migraphx-ref=${migraphx_ref}"
+            echo "release-tag=rocm${major_minor}"
+            echo "base-image=rocm/dev-ubuntu-26.04:${ver}-full"
+            echo "rocm-release=${major_minor}"
+          } >> "$GITHUB_OUTPUT"
 
   set-matrix:
     runs-on: ubuntu-latest
