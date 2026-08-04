@@ -756,16 +756,45 @@ RUN --mount=type=bind,from=pytorch-export,source=/pytorch/dist,target=/wheels-to
         rm -rf /torchvision-src; \
     fi
 
-# Build-time ABI check: the PIP path resolves torch and torchvision independently (separate
-# `pip download` calls, not one joint solve), so a version mismatch between them (torchvision's
-# wheel pins an exact matching torch build; if pytorch-builder resolved a different one) would
-# otherwise only surface as a runtime ImportError in whatever downstream app imports torchvision
-# first. Fail the build here instead, where it's obvious which stage/arch is at fault.
+# ABI gate, and the tier fallback it feeds. The PIP path resolves torch and torchvision
+# independently (separate `pip download` calls, not one joint solve), so a mismatch between them
+# would otherwise only surface as a runtime ImportError in whatever downstream app imports
+# torchvision first. A mismatch is reachable whenever the resolved torch did not come from the
+# same nightly index this wheel did -- notably on the arches where pytorch-builder falls through
+# to its devreleases-snapshot tier. Same structure and reasoning as torchaudio-builder's gate
+# below: an unusable prebuilt wheel drops to the source build (USE_PREBUILT=0 forces the decision
+# script to emit SOURCE), and the post-source verify is NOT tolerant, because a from-source
+# torchvision that cannot import is a real defect rather than a bad wheel pick.
 RUN --mount=type=bind,from=pytorch-export,source=/pytorch/dist,target=/wheels-torch \
-    LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /build-venv/bin/python3 \
-        --find-links /wheels-torch --find-links /torchvision/dist /torchvision/dist/*.whl && \
-    LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH /build-venv/bin/python3 -c \
-        "import torch; import torchvision; print('torchvision', torchvision.__version__, 'OK against torch', torch.__version__)"
+    # set -e, not -eu: $LD_LIBRARY_PATH is unset in this image and every stage here relies on
+    # it expanding to empty, which nounset would turn into an immediate "unbound variable".
+    set -e; \
+    verify() { \
+        LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /build-venv/bin/python3 \
+            --find-links /wheels-torch --find-links /torchvision/dist /torchvision/dist/*.whl \
+        && LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH /build-venv/bin/python3 -c \
+            "import torch; import torchvision; print('torchvision', torchvision.__version__, 'OK against torch', torch.__version__)"; \
+    }; \
+    if verify; then exit 0; fi; \
+    echo "Prebuilt torchvision does not load against the resolved torch -- rebuilding from source"; \
+    uv pip uninstall --python /build-venv/bin/python3 torchvision || true; \
+    rm -rf /torchvision/dist; mkdir -p /torchvision/dist; \
+    PYTORCH_RESOLVED=$(basename "$(ls /wheels-torch/torch-*.whl | head -1)"); \
+    DECISION=$(/tmp/torch-package-build-decide.sh torchvision "${PYTORCH_VERSION}" "${ROCM_ARCH}" 0 "${ROCM_RELEASE}" "${PYTORCH_RESOLVED}"); \
+    REST="${DECISION#SOURCE:}"; \
+    REPO="${REST%%:*}"; \
+    BRANCH="${REST#*:}"; \
+    echo "Building torchvision from source (repo: $REPO, branch: $BRANCH)"; \
+    git clone --recursive --branch "${BRANCH}" --depth 1 --shallow-submodules \
+        "https://github.com/${REPO}.git" /torchvision-src; \
+    cd /torchvision-src; \
+    LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH python3 setup.py bdist_wheel; \
+    cp dist/*.whl /torchvision/dist/; \
+    # Leave the source tree before deleting it -- verify() runs after this, and a
+    # process whose cwd has been unlinked makes every later command warn on getcwd.
+    cd /; \
+    rm -rf /torchvision-src; \
+    verify
 
 FROM ${ROCBLAS_IMAGE} AS torchaudio-builder
 
@@ -828,13 +857,49 @@ RUN --mount=type=bind,from=pytorch-export,source=/pytorch/dist,target=/wheels-to
         rm -rf /torchaudio-src; \
     fi
 
-# Build-time ABI check, same reasoning as torchvision-builder's: torch and torchaudio are
-# resolved independently, verify they actually load together before shipping.
+# ABI gate, and the tier fallback it feeds. torch and torchaudio are resolved by independent
+# `pip download` calls, and torchaudio's wheel metadata pins a bare `torch` with no version
+# constraint (see torch-package-build-decide.sh's own comment on that), so pip cannot catch a
+# mismatch and the date-tag match the decision script does is not an ABI guarantee: a torchaudio
+# wheel built against a different libtorch installs cleanly and then dies on `import` with an
+# undefined symbol (e.g. torch_exception_get_what_without_backtrace). It happens whenever the
+# resolved torch did NOT come from the same nightly index the torchaudio wheel did -- notably on
+# the arches where pytorch-builder falls through to its devreleases-snapshot tier.
+#
+# So an unusable prebuilt wheel drops to the source build rather than failing the image, which is
+# the same tier philosophy pytorch-builder applies to its own download failures. USE_PREBUILT=0
+# forces the decision script to emit SOURCE. The second verify is deliberately NOT tolerant --
+# if a from-source torchaudio can't import either, that is a real defect, not a bad wheel pick.
 RUN --mount=type=bind,from=pytorch-export,source=/pytorch/dist,target=/wheels-torch \
-    LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /build-venv/bin/python3 \
-        --find-links /wheels-torch --find-links /torchaudio/dist /torchaudio/dist/*.whl && \
-    LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH /build-venv/bin/python3 -c \
-        "import torch; import torchaudio; print('torchaudio', torchaudio.__version__, 'OK against torch', torch.__version__)"
+    # set -e, not -eu: $LD_LIBRARY_PATH is unset in this image and every stage here relies on
+    # it expanding to empty, which nounset would turn into an immediate "unbound variable".
+    set -e; \
+    verify() { \
+        LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH uv pip install --python /build-venv/bin/python3 \
+            --find-links /wheels-torch --find-links /torchaudio/dist /torchaudio/dist/*.whl \
+        && LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH /build-venv/bin/python3 -c \
+            "import torch; import torchaudio; print('torchaudio', torchaudio.__version__, 'OK against torch', torch.__version__)"; \
+    }; \
+    if verify; then exit 0; fi; \
+    echo "Prebuilt torchaudio does not load against the resolved torch -- rebuilding from source"; \
+    uv pip uninstall --python /build-venv/bin/python3 torchaudio || true; \
+    rm -rf /torchaudio/dist; mkdir -p /torchaudio/dist; \
+    PYTORCH_RESOLVED=$(basename "$(ls /wheels-torch/torch-*.whl | head -1)"); \
+    DECISION=$(/tmp/torch-package-build-decide.sh torchaudio "${PYTORCH_VERSION}" "" 0 "${ROCM_RELEASE}" "${PYTORCH_RESOLVED}"); \
+    REST="${DECISION#SOURCE:}"; \
+    REPO="${REST%%:*}"; \
+    BRANCH="${REST#*:}"; \
+    echo "Building torchaudio from source (repo: $REPO, branch: $BRANCH)"; \
+    git clone --recursive --branch "${BRANCH}" --depth 1 --shallow-submodules \
+        "https://github.com/${REPO}.git" /torchaudio-src; \
+    cd /torchaudio-src; \
+    LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH python3 setup.py bdist_wheel; \
+    cp dist/*.whl /torchaudio/dist/; \
+    # Leave the source tree before deleting it -- verify() runs after this, and a
+    # process whose cwd has been unlinked makes every later command warn on getcwd.
+    cd /; \
+    rm -rf /torchaudio-src; \
+    verify
 
 # Indirection stages: `COPY --from=$VAR` isn't allowed (BuildKit rejects a
 # variable in --from), so resolve each component-image ARG through a FROM with
