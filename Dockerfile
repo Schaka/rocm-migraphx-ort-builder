@@ -151,7 +151,7 @@ RUN set -eux; \
         amdrocm-llvm amdrocm-llvm-dev \
     && rm -rf /var/lib/apt/lists/*; \
     # amdrocm-hpc-sdk lands everything under /opt/rocm/core-<major.minor>/ (bin, include, lib,
-    # libexec, share, amdgcn) with NO top-level convenience symlinks -- unlike
+    # libexec, llvm, share, amdgcn) with NO top-level convenience symlinks -- unlike
     # rocm/dev-ubuntu-26.04, which symlinks include/lib/share/etc at /opt/rocm/ straight into its
     # own versioned core dir (see rocblas-builder's comment below for that same layout on the
     # official image). Every other stage in this Dockerfile hardcodes paths like
@@ -162,28 +162,33 @@ RUN set -eux; \
     for d in "$core_dir"/*; do \
         ln -s "$(basename "$core_dir")/$(basename "$d")" "/opt/rocm/$(basename "$d")"; \
     done; \
-    # The compiler needs one more symlink than that loop can produce. TheRock installs it
-    # NESTED, at core-<ver>/lib/llvm (verified in amdrocm-llvm10.1's own file list), so the
-    # loop -- which only links direct children of core-<ver>/ -- yields /opt/rocm/lib and
-    # therefore a working /opt/rocm/lib/llvm/bin/clang++, but no /opt/rocm/llvm at all.
-    # AMD's rocm/dev-ubuntu-26.04 puts the compiler at /opt/rocm/llvm/bin/clang++, and that
-    # is the path this Dockerfile hardcodes everywhere (and the path a pinned release build
-    # against AMD's own image gets), so this base has to expose it under the same name.
-    # Searched for rather than hardcoded: whether upstream ships llvm as core-<ver>/llvm or
-    # core-<ver>/lib/llvm has changed before, and either layout resolves correctly here.
-    if [ ! -e /opt/rocm/llvm ]; then \
-        llvm_dir=$(find "$core_dir" -mindepth 1 -maxdepth 2 -type d -name llvm | head -1); \
-        if [ -z "$llvm_dir" ]; then \
-            echo "FATAL: no llvm directory under ${core_dir} after installing amdrocm-llvm." >&2; \
-            find "$core_dir" -maxdepth 2 -type d >&2; \
-            exit 1; \
-        fi; \
-        ln -sfn "${llvm_dir#/opt/rocm/}" /opt/rocm/llvm; \
+    # The llvm child the loop just linked is a decoy. amdrocm-llvm ships TWO llvm trees:
+    # core-<ver>/llvm holds nothing but bin/{clang,clang++,clang-cl,clang-cpp,clang-23,flang,
+    # rocm}.cfg -- seven config files and not one executable -- while the actual toolchain
+    # (clang, clang++, lld, amdclang, llvm-*, the amdgcn device bitcode) sits one level
+    # deeper at core-<ver>/lib/llvm, whose own bin/ carries those same seven .cfg files.
+    # The shallow tree is therefore a strict subset, and /opt/rocm/llvm -> core-<ver>/llvm
+    # is a directory that exists, satisfies any [ -e ] test, and still has no compiler in
+    # it -- which is exactly how a base image with no usable clang gets published.
+    # Repoint it at whichever tree actually contains bin/clang++ (searched for, not
+    # hardcoded, since which of the two upstream populates has changed before). AMD's
+    # rocm/dev-ubuntu-26.04 exposes the compiler at /opt/rocm/llvm/bin/clang++, that is the
+    # path every stage below hardcodes, and a pinned release build against AMD's own image
+    # gets it for free -- so this base has to present it under the same name.
+    clangxx=$(find "$core_dir" -maxdepth 4 -path '*/bin/clang++' | head -1); \
+    if [ -z "$clangxx" ]; then \
+        echo "FATAL: no bin/clang++ anywhere under ${core_dir} -- amdrocm-llvm did not install a compiler." >&2; \
+        find "$core_dir" -maxdepth 3 -type d -name llvm >&2; \
+        exit 1; \
     fi; \
-    # Hard gate on the result. Without it a base missing the compiler still builds and
-    # publishes happily, and the breakage only surfaces hours later in migraphx-builder as
-    # cmake's "is not a full path to an existing compiler tool" -- or, worse, as that
-    # stage's unrelated-looking python-ABI guard. Fail here, where the cause is obvious.
+    llvm_root=$(dirname "$(dirname "$clangxx")"); \
+    # rm targets the loop's symlink itself (no trailing slash), never the tree it points at.
+    rm -f /opt/rocm/llvm; \
+    ln -s "${llvm_root#/opt/rocm/}" /opt/rocm/llvm; \
+    # Hard gate on the result. Without it a compiler-less base still builds and publishes
+    # happily, and the breakage only surfaces hours later in migraphx-builder as cmake's
+    # "is not a full path to an existing compiler tool" -- or, worse, as that stage's
+    # unrelated-looking python-ABI guard. Fail here, where the cause is one line up.
     /opt/rocm/llvm/bin/clang++ --version; \
     echo "OK: /opt/rocm/llvm/bin/clang++ present (-> $(readlink -f /opt/rocm/llvm))"
 
