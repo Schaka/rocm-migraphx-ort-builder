@@ -751,7 +751,17 @@ RUN --mount=type=bind,from=pytorch-export,source=/pytorch/dist,target=/wheels-to
         git clone --recursive --branch "${BRANCH}" --depth 1 --shallow-submodules \
             "https://github.com/${REPO}.git" /torchvision-src && \
         cd /torchvision-src && \
-        LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH python3 setup.py bdist_wheel && \
+        # ROCM_HOME/ROCM_PATH are the load-bearing part of this prefix, not the -I flags. torchaudio and
+        # torchvision build their extensions through torch's cpp_extension, whose include_paths() appends
+        # _join_rocm_home('include') for a HIP extension -- and _find_rocm_home() prefers $ROCM_HOME, then
+        # `which hipcc`, and only then /opt/rocm. The PIP/snapshot-tier torch wheels install TheRock's
+        # rocm_sdk_core into the SAME venv, which puts a hipcc shim on PATH, so that second guess wins and
+        # ROCM_HOME resolves to the venv root -- yielding a bogus <venv>/include that has no hip/ at all,
+        # and a compile that dies on `hip/hip_runtime.h: No such file or directory`. Verified against the
+        # published gfx90c torch image: unset, include_paths('cuda') ends in <venv>/include and the build
+        # fails; pinned to /opt/rocm it ends in /opt/rocm/include and the wheel builds and imports.
+        # CPPFLAGS/CXXFLAGS/LDFLAGS are belt-and-braces for anything that bypasses include_paths().
+        ROCM_HOME=/opt/rocm ROCM_PATH=/opt/rocm PATH="$PATH:/opt/rocm/bin" CPPFLAGS="-I/opt/rocm/include ${CPPFLAGS:-}" CXXFLAGS="-I/opt/rocm/include ${CXXFLAGS:-}" LDFLAGS="-L/opt/rocm/lib ${LDFLAGS:-}" LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH python3 setup.py bdist_wheel && \
         cp dist/*.whl /torchvision/dist/ && \
         rm -rf /torchvision-src; \
     fi
@@ -788,7 +798,8 @@ RUN --mount=type=bind,from=pytorch-export,source=/pytorch/dist,target=/wheels-to
     git clone --recursive --branch "${BRANCH}" --depth 1 --shallow-submodules \
         "https://github.com/${REPO}.git" /torchvision-src; \
     cd /torchvision-src; \
-    LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH python3 setup.py bdist_wheel; \
+    # ROCm env prefix -- see the explanation at torchvision-builder's own source build above.
+    ROCM_HOME=/opt/rocm ROCM_PATH=/opt/rocm PATH="$PATH:/opt/rocm/bin" CPPFLAGS="-I/opt/rocm/include ${CPPFLAGS:-}" CXXFLAGS="-I/opt/rocm/include ${CXXFLAGS:-}" LDFLAGS="-L/opt/rocm/lib ${LDFLAGS:-}" LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH python3 setup.py bdist_wheel; \
     cp dist/*.whl /torchvision/dist/; \
     # Leave the source tree before deleting it -- verify() runs after this, and a
     # process whose cwd has been unlinked makes every later command warn on getcwd.
@@ -852,7 +863,8 @@ RUN --mount=type=bind,from=pytorch-export,source=/pytorch/dist,target=/wheels-to
         git clone --recursive --branch "${BRANCH}" --depth 1 --shallow-submodules \
             "https://github.com/${REPO}.git" /torchaudio-src && \
         cd /torchaudio-src && \
-        LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH python3 setup.py bdist_wheel && \
+        # ROCm env prefix -- see the explanation at torchvision-builder's own source build above.
+        ROCM_HOME=/opt/rocm ROCM_PATH=/opt/rocm PATH="$PATH:/opt/rocm/bin" CPPFLAGS="-I/opt/rocm/include ${CPPFLAGS:-}" CXXFLAGS="-I/opt/rocm/include ${CXXFLAGS:-}" LDFLAGS="-L/opt/rocm/lib ${LDFLAGS:-}" LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH python3 setup.py bdist_wheel && \
         cp dist/*.whl /torchaudio/dist/ && \
         rm -rf /torchaudio-src; \
     fi
@@ -893,7 +905,8 @@ RUN --mount=type=bind,from=pytorch-export,source=/pytorch/dist,target=/wheels-to
     git clone --recursive --branch "${BRANCH}" --depth 1 --shallow-submodules \
         "https://github.com/${REPO}.git" /torchaudio-src; \
     cd /torchaudio-src; \
-    LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH python3 setup.py bdist_wheel; \
+    # ROCm env prefix -- see the explanation at torchvision-builder's own source build above.
+    ROCM_HOME=/opt/rocm ROCM_PATH=/opt/rocm PATH="$PATH:/opt/rocm/bin" CPPFLAGS="-I/opt/rocm/include ${CPPFLAGS:-}" CXXFLAGS="-I/opt/rocm/include ${CXXFLAGS:-}" LDFLAGS="-L/opt/rocm/lib ${LDFLAGS:-}" LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH python3 setup.py bdist_wheel; \
     cp dist/*.whl /torchaudio/dist/; \
     # Leave the source tree before deleting it -- verify() runs after this, and a
     # process whose cwd has been unlinked makes every later command warn on getcwd.
@@ -1048,6 +1061,12 @@ RUN uv venv $VIRTUAL_ENV_TORCH --python 3.12 --seed
 # index -- byte-identical content, but seen at two different local file:// paths uv's resolver
 # errors with "conflicting URLs" instead of just picking one.
 #
+# One cp PER source dir, not a single cp with three globs: the duplicates above mean the same
+# basename is supplied twice in one argument list, and GNU cp refuses that with "will not
+# overwrite just-created" AND exits non-zero -- it only permits clobbering a file an EARLIER
+# invocation wrote. Sequential invocations therefore give last-source-wins, and the order below
+# (pytorch, then torchvision, then torchaudio) is what decides the winner.
+#
 # The merge target is a cache mount, so the merged copy is likewise absent from the image. It is
 # emptied on entry and on exit: a cache mount persists between builds on the same builder, and
 # stale wheels left in it would be picked up by the */*.whl globs below on a later, differently
@@ -1073,7 +1092,7 @@ RUN --mount=type=bind,from=pytorch-export,source=/pytorch/dist,target=/wheels-sr
     --mount=type=bind,from=torchaudio-export,source=/torchaudio/dist,target=/wheels-src/torchaudio \
     --mount=type=cache,target=/tmp/wheels-torch,sharing=locked,id=final-wheels-torch \
     rm -rf /tmp/wheels-torch/* \
-    && cp /wheels-src/pytorch/* /wheels-src/torchvision/* /wheels-src/torchaudio/* /tmp/wheels-torch/ \
+    && for d in pytorch torchvision torchaudio; do cp -f "/wheels-src/$d"/* /tmp/wheels-torch/ || exit 1; done \
     && uv pip install --python "$VIRTUAL_ENV_TORCH/bin/python3" --no-cache --no-deps --find-links /tmp/wheels-torch \
         numpy filelock typing_extensions sympy networkx jinja2 fsspec mpmath MarkupSafe \
         setuptools pillow \
