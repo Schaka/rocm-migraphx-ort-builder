@@ -15,7 +15,7 @@ on:
   workflow_call:
     inputs:
       component:
-        description: 'Component name -- drives the package and the Dockerfile target (rocblas|migraphx|pytorch|ort|final)'
+        description: 'Component name -- drives the package and the Dockerfile target (rocr-clr|rocr|rocblas|miopen|migraphx|pytorch|ort|final)'
         required: true
         type: string
       target:
@@ -28,8 +28,44 @@ on:
         required: false
         type: boolean
         default: false
+      # The gfx803 tree holds more than one build line (gfx803/Dockerfile on
+      # ROCm 6.4.4, gfx803/rocm7/Dockerfile on 7.14). They publish to the same
+      # packages, so a second line MUST carry its own tag suffix or it
+      # overwrites the first line's images -- including :latest-gfx803, the
+      # one downstream consumers actually pull. Defaults keep the 6.4.4 line's
+      # existing tags byte-identical.
+      build-dir:
+        description: 'Directory holding the Dockerfile, and the build context (gfx803 | gfx803/rocm7)'
+        required: false
+        type: string
+        default: 'gfx803'
+      tag-suffix:
+        description: 'Appended to every tag and to the cache ref, e.g. -rocm7. Empty for the ROCm 6.4.4 line.'
+        required: false
+        type: string
+        default: ''
+      release-tag:
+        description: 'ROCm-release tag component for the final image, e.g. rocm6.4.4'
+        required: false
+        type: string
+        default: 'rocm6.4.4'
+      with-rocr-clr-image:
+        description: 'Pass ROCR_CLR_IMAGE so this build COPYs from the prebuilt ROCR-Runtime/CLR image'
+        required: false
+        type: boolean
+        default: false
+      with-rocr-image:
+        description: 'Pass ROCR_IMAGE so this build COPYs from the prebuilt gfx803 ROCR-Runtime (libhsa) image'
+        required: false
+        type: boolean
+        default: false
       with-rocblas-image:
         description: 'Pass ROCBLAS_IMAGE so this build COPYs from the prebuilt rocBLAS image'
+        required: false
+        type: boolean
+        default: false
+      with-miopen-image:
+        description: 'Pass MIOPEN_IMAGE so this build COPYs from the prebuilt MIOpen image'
         required: false
         type: boolean
         default: false
@@ -112,9 +148,19 @@ jobs:
         id: meta
         run: |
           owner="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+          # rocr-clr and miopen get their own packages rather than being built
+          # inline by whatever stage happens to need them. Both are needed by
+          # more than one downstream stage (ROCR/CLR by rocblas AND miopen;
+          # MIOpen by final), and a stage that isn't handed a prebuilt image
+          # recompiles it from source inside its own job -- so without these,
+          # the final job alone would compile ROCR, CLR and MIOpen on top of
+          # everything else it does, inside one 360-minute, disk-tight runner.
           pkg() {
             case "$1" in
+              rocr-clr) echo "${owner}/rocm-rocr-clr-builder" ;;
+              rocr)     echo "${owner}/rocm-rocr-builder" ;;
               rocblas)  echo "${owner}/rocm-rocblas-builder" ;;
+              miopen)   echo "${owner}/rocm-miopen-builder" ;;
               migraphx) echo "${owner}/rocm-migraphx-builder" ;;
               pytorch)  echo "${owner}/rocm-migraphx-torch-builder" ;;
               ort)      echo "${owner}/rocm-migraphx-ort-builder" ;;
@@ -123,21 +169,35 @@ jobs:
           }
           component="${{ inputs.component }}"
           self="$(pkg "${component}")"
+          # Every tag this workflow reads or writes carries the suffix, so the
+          # two build lines never see each other's images -- an intermediate
+          # pulled without it would silently mix a 6.4.4 component into a 7.14
+          # build, which fails much later and very confusingly.
+          arch="gfx803${{ inputs.tag-suffix }}"
 
           {
             echo "build-args<<ARGS_EOF"
             echo "ROCM_ARCH=gfx803"
+            if [ "${{ inputs.with-rocr-clr-image }}" = "true" ]; then
+              echo "ROCR_CLR_IMAGE=$(pkg rocr-clr):${arch}"
+            fi
+            if [ "${{ inputs.with-rocr-image }}" = "true" ]; then
+              echo "ROCR_IMAGE=$(pkg rocr):${arch}"
+            fi
             if [ "${{ inputs.with-rocblas-image }}" = "true" ]; then
-              echo "ROCBLAS_IMAGE=$(pkg rocblas):gfx803"
+              echo "ROCBLAS_IMAGE=$(pkg rocblas):${arch}"
+            fi
+            if [ "${{ inputs.with-miopen-image }}" = "true" ]; then
+              echo "MIOPEN_IMAGE=$(pkg miopen):${arch}"
             fi
             if [ "${{ inputs.with-migraphx-image }}" = "true" ]; then
-              echo "MIGRAPHX_IMAGE=$(pkg migraphx):gfx803"
+              echo "MIGRAPHX_IMAGE=$(pkg migraphx):${arch}"
             fi
             if [ "${{ inputs.with-pytorch-image }}" = "true" ]; then
-              echo "PYTORCH_IMAGE=$(pkg pytorch):gfx803"
+              echo "PYTORCH_IMAGE=$(pkg pytorch):${arch}"
             fi
             if [ "${{ inputs.with-ort-image }}" = "true" ]; then
-              echo "ORT_IMAGE=$(pkg ort):gfx803"
+              echo "ORT_IMAGE=$(pkg ort):${arch}"
             fi
             # Empty means "leave the Dockerfile's pin alone" -- passing an
             # empty build-arg would override the ARG default with "" and break
@@ -151,16 +211,19 @@ jobs:
           if [ "${{ inputs.final }}" = "true" ]; then
             {
               echo "tags<<TAGS_EOF"
-              echo "${self}:latest-gfx803"
-              echo "${self}:rocm6.4.4-gfx803"
-              echo "${self}:${{ steps.date.outputs.date }}-gfx803"
+              echo "${self}:latest-${arch}"
+              # No suffix on this one: the ROCm release already names the line
+              # (rocm6.4.4-gfx803 vs rocm7.14-gfx803), so adding it would just
+              # read as rocm7.14-gfx803-rocm7.
+              echo "${self}:${{ inputs.release-tag }}-gfx803"
+              echo "${self}:${{ steps.date.outputs.date }}-${arch}"
               echo "TAGS_EOF"
             } >> "$GITHUB_OUTPUT"
           else
-            echo "tags=${self}:gfx803" >> "$GITHUB_OUTPUT"
+            echo "tags=${self}:${arch}" >> "$GITHUB_OUTPUT"
           fi
 
-          echo "cache-ref=${self}:cache-gfx803" >> "$GITHUB_OUTPUT"
+          echo "cache-ref=${self}:cache-${arch}" >> "$GITHUB_OUTPUT"
 
           # final's cache is never consumed downstream (nothing builds FROM the
           # final image), so mode=max there just re-exports every inherited
@@ -180,8 +243,11 @@ jobs:
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
-          context: gfx803
-          file: gfx803/Dockerfile
+          # Context is the build line's own directory, not the repo root: each
+          # gfx803 Dockerfile is self-contained and COPYs only from its own
+          # patches/ (see each file's header).
+          context: ${{ inputs.build-dir }}
+          file: ${{ inputs.build-dir }}/Dockerfile
           push: true
           target: ${{ inputs.target }}
           tags: ${{ steps.meta.outputs.tags }}

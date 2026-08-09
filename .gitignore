@@ -47,3 +47,7 @@ local-runtime/
 # AI bullshit
 .claude
 .tokensave
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+graft/
+.mcp.json
