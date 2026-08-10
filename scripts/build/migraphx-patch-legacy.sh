@@ -16,10 +16,9 @@ fi
 # against that list generates a dummy target and returns, per CK's own
 # CMakeLists, rather than building anything real). Turning it off via
 # -DMIGRAPHX_USE_COMPOSABLEKERNEL=Off alone is not sufficient: rbuild builds
-# everything requirements.txt lists regardless of MIGraphX's own cmake options
-# (same gotcha gfx803/Dockerfile documents for its own rocMLIR/CK
-# exclusion), so it would still try to build CK's dummy target for these arches.
-# Strip the line so rbuild never attempts it.
+# everything requirements.txt lists regardless of MIGraphX's own cmake options,
+# so it would still try to build CK's dummy target for these arches. Strip the
+# line so rbuild never attempts it.
 sed -i '/composable_kernel/d' requirements.txt
 if grep -q 'composable_kernel' requirements.txt; then
     echo "FATAL: composable_kernel still listed in MIGraphX requirements.txt after the strip." >&2

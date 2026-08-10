@@ -23,9 +23,6 @@
 # CI use: set the variables below as environment variables and name one target.
 # Every variable is overridable from the environment -- that is how the workflows
 # pass a single arch, a pinned ROCm release, or a prebuilt component image.
-#
-# gfx803 is NOT part of this graph. It needs a different ROCm major entirely
-# (ROCm 7 cannot enumerate Polaris) and lives in gfx803/, with its own bake file.
 
 # ---------------------------------------------------------------------------
 # Registry / naming

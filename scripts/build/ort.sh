@@ -10,6 +10,19 @@
 # Inputs (build-args): ROCM_ARCH.
 set -eu
 
+# setup.py reads this file's contents verbatim as the wheel's version, no
+# format validation -- appending a PEP 440 local segment here lands straight
+# in the wheel's METADATA. PyPI's own onnxruntime can otherwise report the
+# exact same version this build does, which would make an exact-version pin
+# in the final image's constraints file unenforceable (PyPI could satisfy it
+# too); a suffix no PyPI release will ever carry closes that gap. Tagged by
+# arch, not just a fixed marker, because this repo publishes one wheel per
+# ROCM_ARCH -- a plain "+migraphx" would make gfx900's and gfx1100's wheels
+# version-identical despite being different, arch-specific builds. ROCM_ARCH
+# is always plain alphanumeric (gfx900, gfx1100, ...), a valid PEP 440 local
+# segment as-is, no sanitizing needed.
+printf '%s+%s' "$(cat VERSION_NUMBER)" "${ROCM_ARCH}" > VERSION_NUMBER
+
 python3 tools/ci_build/build.py \
     --config Release \
     --build_dir /onnxruntime/build \

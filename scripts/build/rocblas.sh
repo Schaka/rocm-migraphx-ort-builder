@@ -66,15 +66,13 @@ echo "rocBLAS build: arch ${ROCM_ARCH}, $jobs parallel jobs"
 python3 ./rmake.py -i -a "${ROCM_ARCH}" -j "$jobs" --no_hipblaslt
 
 # rmake's -i install target lands under build/release/rocblas-install, not
-# /opt/rocm -- same install-path quirk as gfx803/Dockerfile, see the
-# comments there for the full story (relative CMAKE_INSTALL_PREFIX, and why
-# --cleanup is never passed).
+# /opt/rocm (relative CMAKE_INSTALL_PREFIX) -- the copy below moves it into
+# place.
 echo "Copying rocBLAS ${ROCM_ARCH} install output into /opt/rocm..."
 
 # This base image lays /opt/rocm out as versioned component dirs (core, core-7,
 # core-7.14) with include/lib/share at the top level as convenience symlinks
-# into core-7.14/ -- unlike gfx803's older, flatter base image, where a plain
-# `cp -a src/. /opt/rocm/` is enough. Here that fails outright: cp won't
+# into core-7.14/. A plain `cp -a src/. /opt/rocm/` fails outright here: cp won't
 # overwrite an existing symlink-named entry with a real directory ("cannot
 # overwrite non-directory ... with directory"). Resolve each of
 # include/lib/share to what it actually points at first, so content lands in

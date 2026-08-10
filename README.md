@@ -15,11 +15,9 @@ with otherwise-stable Torch/ORT. Grew into two separate things:
   any particular schedule.
 
   This same pinning also doubles as an escape hatch if an arch ever falls out
-  of upstream support the way gfx803 already has (see below): trigger one last
-  manual release build pinned to the last ROCm/PyTorch/MIGraphX combination
-  that arch still works on, and keep re-publishing that exact combination on
-  demand -- no separate Dockerfile fork needed, unlike gfx803, which predates
-  this workflow and needed one because ROCm 7 dropped it outright.
+  of upstream support: trigger one last manual release build pinned to the
+  last ROCm/PyTorch/MIGraphX combination that arch still works on, and keep
+  re-publishing that exact combination on demand.
 
 Both published to `ghcr.io/<owner>/rocm-migraphx-ort-torch-builder`.
 
@@ -46,9 +44,9 @@ job already pulls. Each component lands in its own package:
   (see "Nightly ROCm base image" below). Arch-independent, built once before
   the arch matrix, not part of the per-arch tag scheme below.
 - `rocm-rocblas-builder:<arch>` -- ROCm with rocBLAS rebuilt from source. Only
-  exists for the arches that need it (`gfx900`, `gfx906`, `gfx90c`, `gfx803`);
-  MIGraphX and PyTorch both start from it there instead of each rebuilding
-  rocBLAS themselves
+  exists for the arches that need it (`gfx900`, `gfx906`, `gfx90c`); MIGraphX
+  and PyTorch both start from it there instead of each rebuilding rocBLAS
+  themselves
 - `rocm-migraphx-builder:<arch>` -- from-source MIGraphX + ROCm deps in `/opt/rocm`
 - `rocm-migraphx-torch-builder:<arch>` -- PyTorch wheel
 - `rocm-torchvision-builder:<arch>` -- torchvision wheel (built against the PyTorch wheel above)
@@ -71,11 +69,6 @@ is rebuilt from a version-pinned source ref; pytorch's own version/ROCm-release
 build-args differ from nightly's), so tagging them the same as nightly's plain
 `<arch>` would silently overwrite one build with the other instead of keeping
 them as separate, versioned artifacts.
-
-The `gfx803` tags in these packages are the odd ones out: Polaris can't be
-enumerated by ROCm 7 at all, so they come from `gfx803/Dockerfile` on a
-ROCm 6.4.4 base, built by a separate manual workflow. Same tag scheme, different
-stack -- see [gfx803/README.md](gfx803/README.md).
 
 Torch is also built from source rather than reusing AMD's `rocm/pytorch`
 image: current `rocm/pytorch` tags ship TheRock's pip-packaged ROCm SDK (no
@@ -139,13 +132,11 @@ Officially supported: **gfx900 and above**, i.e. what AMD lists in the ROCm
 supported-GPU matrix. Those are the archs in `ROCM_ARCH`, the ones built
 nightly, and the only ones worth filing issues against.
 
-There is also an experimental **Polaris / gfx803** variant (RX 460 through RX
-590) built from `gfx803/Dockerfile` by a separate manual workflow. It is
-a different ROCm major on a different base image rather than another arch in
-the matrix, because ROCm 7 removed Polaris support from ROCR-Runtime outright.
-It is verified on an RX 470 8GB but still slow by construction. Everything about it --
-rationale, versions, packages, caveats -- lives in
-**[gfx803/README.md](gfx803/README.md)**; nothing in this README applies to it.
+**Polaris / gfx803** (RX 460 through RX 590) is not supported by anything in
+this repo -- ROCm 7 removed Polaris support from ROCR-Runtime outright, so it
+needs a different ROCm major, a different base image, and a different build
+entirely, none of which fit this repo's graph. It has its own repo instead:
+[github.com/Schaka/rocm-gfx803](https://github.com/Schaka/rocm-gfx803).
 
 ## Using this image
 
@@ -233,7 +224,6 @@ scripts/build/*.sh       # one script per non-trivial build step, mounted into
 .github/actions/         # composite actions: runner preparation, arch matrix
 .github/workflows/       # orchestration only; they set bake variables and name
                          # a target, and contain no build logic
-gfx803/                  # separate ROCm 6.4 build for Polaris, own bake file
 ```
 
 Components are wired to each other through Bake *named contexts* rather than
@@ -383,7 +373,7 @@ Inputs, all optional with sane defaults:
 - `use_prebuilt` (default `true`) - try AMD's prebuilt wheels first for
   pytorch/torchvision/torchaudio, falling back to source per-package if none
   match; `false` forces a full from-source build of all three.
-- `arch` (default empty = full matrix minus `gfx803`) - single arch to build.
+- `arch` (default empty = full matrix) - single arch to build.
 
 Unlike nightly, this workflow never touches the self-built `rocm-builder`
 base at all -- `BASE_IMAGE` is always the AMD-pinned tag derived from

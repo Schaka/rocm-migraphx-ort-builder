@@ -75,4 +75,25 @@ RUN --mount=type=bind,from=pytorch,source=/pytorch/dist,target=/wheels-src/pytor
     --mount=type=bind,source=scripts/build/final-torch-venv.sh,target=/scripts/build/final-torch-venv.sh \
     /scripts/build/final-torch-venv.sh
 
+# This image is a drop-in BASE_IMAGE for downstream Dockerfiles -- any of them
+# can `pip install`/`uv pip install` something that pulls in torch,
+# torchvision, torchaudio or onnxruntime as a transitive dependency (exactly
+# what happened installing faster-whisper: ctranslate2 depends on
+# onnxruntime, and pip silently swapped this image's MIGraphX-EP build for a
+# generic CPU-only PyPI wheel, no error, no warning). Pinning the exact
+# already-installed version via a constraints file turns that from a silent
+# swap into a loud resolution failure -- pip/uv can't satisfy the pin from
+# any index, they can only reuse what's already installed. Both env vars are
+# set because pip reads PIP_CONSTRAINT and uv reads UV_CONSTRAINT; neither
+# tool honors the other's. onnxruntime's build tags itself with a PEP 440
+# local version (+<ROCM_ARCH>, see scripts/build/ort.sh's VERSION_NUMBER
+# edit) specifically so this pin is enforceable -- an exact-version pin PyPI
+# could also satisfy would defeat the whole point.
+RUN { "$VIRTUAL_ENV/bin/pip" freeze --local | grep -E '^onnxruntime==' || true; \
+      "$VIRTUAL_ENV_TORCH/bin/pip" freeze --local | grep -E '^(torch|torchvision|torchaudio)==' || true; \
+    } > /opt/pip-constraints.txt \
+    && cat /opt/pip-constraints.txt
+ENV PIP_CONSTRAINT=/opt/pip-constraints.txt
+ENV UV_CONSTRAINT=/opt/pip-constraints.txt
+
 ENV PATH="$VIRTUAL_ENV/bin:${PATH}"

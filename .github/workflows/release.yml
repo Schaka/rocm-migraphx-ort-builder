@@ -20,9 +20,12 @@ name: Release build
 #     wheel discovery AND rocblas's from-source rebuild (gfx900/906/90c) both
 #     pin to this exact ROCm line instead of floating.
 #
-# Same per-arch fan-out as nightly.yml, minus gfx803 (different Dockerfile,
-# different ROCm major entirely -- see gfx803/README.md; it stays on its own
-# manual gfx803.yml workflow and isn't part of this scheme).
+# Same per-arch fan-out as nightly.yml.
+#
+# Polaris (gfx803) is not part of this scheme -- ROCm 7 can't enumerate it at
+# all, and even the ROCm 6.4.x line needs a different Dockerfile/build
+# pipeline entirely. It's built and released from a separate repo,
+# github.com/Schaka/rocm-gfx803, not from anything here.
 
 on:
   workflow_dispatch:
@@ -49,7 +52,7 @@ on:
         required: false
         default: true
       arch:
-        description: 'Single gfx arch to build (e.g. gfx1201). Leave empty for the full matrix (all supported arches except gfx803).'
+        description: 'Single gfx arch to build (e.g. gfx1201). Leave empty for the full matrix.'
         required: false
         default: ''
       debug:

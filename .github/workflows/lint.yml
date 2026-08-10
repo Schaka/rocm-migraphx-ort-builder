@@ -12,14 +12,12 @@ on:
       - 'docker/**'
       - 'scripts/**'
       - '.github/**'
-      - 'gfx803/**'
   pull_request:
     paths:
       - 'docker-bake.hcl'
       - 'docker/**'
       - 'scripts/**'
       - '.github/**'
-      - 'gfx803/**'
   workflow_dispatch:
 
 jobs:

@@ -8,9 +8,7 @@
 # gfx900/gfx906/gfx90c code objects at all (confirmed: no
 # amdrocm-blas*-gfx900/-gfx906/-gfx90c apt package exists, and the base image's
 # Tensile library on disk has no gfx900/gfx906/gfx90c folder) -- but the *source*
-# still carries them, so rebuilding covers them without a ROCm-major downgrade,
-# unlike gfx803 (which needs one for Polaris's actual ROCR enumeration break on
-# ROCm 7 -- see gfx803/).
+# still carries them, so rebuilding covers them without a ROCm-major downgrade.
 #
 # Every torch-side and MIGraphX target builds FROM this one, so both see the
 # rebuilt rocBLAS when it applies. On gfx900/gfx906/gfx90c, CI overrides this

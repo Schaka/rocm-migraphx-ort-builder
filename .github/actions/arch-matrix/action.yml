@@ -24,15 +24,6 @@ runs:
         ARCH: ${{ inputs.arch }}
       run: |
         set -euo pipefail
-        # gfx803 shares this pipeline's published packages but not its
-        # Dockerfiles: it is built from gfx803/ on a ROCm 6.4.x base by
-        # gfx803.yml, because ROCm 7 can't enumerate Polaris at all. Letting it
-        # through here would build the ROCm 7 graph for it and overwrite the good
-        # gfx803 tags with something that can't run.
-        if [ "$ARCH" = "gfx803" ]; then
-          echo "gfx803 is not built by this workflow -- run 'Build gfx803 (Polaris)' instead." >&2
-          exit 1
-        fi
 
         all='["gfx900","gfx90c","gfx906","gfx908","gfx90a","gfx942","gfx950",
               "gfx1010","gfx1011","gfx1012","gfx1030","gfx1031","gfx1032",
