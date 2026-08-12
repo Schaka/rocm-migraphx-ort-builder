@@ -10,19 +10,6 @@
 # Inputs (build-args): ROCM_ARCH.
 set -eu
 
-# setup.py reads this file's contents verbatim as the wheel's version, no
-# format validation -- appending a PEP 440 local segment here lands straight
-# in the wheel's METADATA. PyPI's own onnxruntime can otherwise report the
-# exact same version this build does, which would make an exact-version pin
-# in the final image's constraints file unenforceable (PyPI could satisfy it
-# too); a suffix no PyPI release will ever carry closes that gap. Tagged by
-# arch, not just a fixed marker, because this repo publishes one wheel per
-# ROCM_ARCH -- a plain "+migraphx" would make gfx900's and gfx1100's wheels
-# version-identical despite being different, arch-specific builds. ROCM_ARCH
-# is always plain alphanumeric (gfx900, gfx1100, ...), a valid PEP 440 local
-# segment as-is, no sanitizing needed.
-printf '%s+%s' "$(cat VERSION_NUMBER)" "${ROCM_ARCH}" > VERSION_NUMBER
-
 python3 tools/ci_build/build.py \
     --config Release \
     --build_dir /onnxruntime/build \
@@ -36,7 +23,30 @@ python3 tools/ci_build/build.py \
     --cmake_extra_defines "CMAKE_C_COMPILER_LAUNCHER=ccache" \
     --cmake_extra_defines "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
 
-# /onnxruntime/dist is a real layer path, not a cache mount -- this is what the
-# final stage bind-mounts to install from.
+# Tagging the wheel's version happens here, post-build, not by editing
+# VERSION_NUMBER before the C++ build: onnxruntime_c_api.cc has a compile-time
+# static_assert comparing ORT_VERSION against a hardcoded literal, which a PEP
+# 440 local segment in VERSION_NUMBER trips. wheel unpack/pack is the only
+# safe way to add one -- PyPI's own onnxruntime can otherwise report the exact
+# same version this build does, which would make an exact-version pin in the
+# final image's constraints file unenforceable (PyPI could satisfy it too); a
+# suffix no PyPI release will ever carry closes that gap. Tagged by arch, not
+# just a fixed marker, because this repo publishes one wheel per ROCM_ARCH --
+# a plain "+migraphx" would make gfx900's and gfx1100's wheels
+# version-identical despite being different, arch-specific builds. ROCM_ARCH
+# is always plain alphanumeric (gfx900, gfx1100, ...), a valid PEP 440 local
+# segment as-is, no sanitizing needed.
+built_whl="$(ls /onnxruntime/build/Release/dist/*.whl)"
+unpack_dir="/onnxruntime/build/Release/dist/unpacked"
+python3 -m wheel unpack "$built_whl" -d "$unpack_dir"
+old_dir="$(find "$unpack_dir" -mindepth 1 -maxdepth 1 -type d)"
+old_name="$(basename "$old_dir")"
+new_name="${old_name}+${ROCM_ARCH}"
+mv "$old_dir" "$unpack_dir/$new_name"
+old_dist_info="$(find "$unpack_dir/$new_name" -maxdepth 1 -name '*.dist-info')"
+new_dist_info="$unpack_dir/$new_name/${new_name}.dist-info"
+mv "$old_dist_info" "$new_dist_info"
+sed -i "s/^Version: .*/Version: ${old_name#*-}+${ROCM_ARCH}/" "$new_dist_info/METADATA"
+
 mkdir -p /onnxruntime/dist
-cp /onnxruntime/build/Release/dist/*.whl /onnxruntime/dist/
+python3 -m wheel pack "$unpack_dir/$new_name" -d /onnxruntime/dist

@@ -86,9 +86,9 @@ RUN --mount=type=bind,from=pytorch,source=/pytorch/dist,target=/wheels-src/pytor
 # any index, they can only reuse what's already installed. Both env vars are
 # set because pip reads PIP_CONSTRAINT and uv reads UV_CONSTRAINT; neither
 # tool honors the other's. onnxruntime's build tags itself with a PEP 440
-# local version (+<ROCM_ARCH>, see scripts/build/ort.sh's VERSION_NUMBER
-# edit) specifically so this pin is enforceable -- an exact-version pin PyPI
-# could also satisfy would defeat the whole point.
+# local version (+<ROCM_ARCH>, see scripts/build/ort.sh's post-build wheel
+# repack) specifically so this pin is enforceable -- an exact-version pin
+# PyPI could also satisfy would defeat the whole point.
 RUN { "$VIRTUAL_ENV/bin/pip" freeze --local | grep -E '^onnxruntime==' || true; \
       "$VIRTUAL_ENV_TORCH/bin/pip" freeze --local | grep -E '^(torch|torchvision|torchaudio)==' || true; \
     } > /opt/pip-constraints.txt \
