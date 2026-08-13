@@ -124,7 +124,9 @@ Two things worth knowing if you touch this stage:
   symlinks, and `amdrocm-hpc-sdk` alone doesn't pull HIP's own dev/cmake
   package (`amdrocm-core-dev`/`amdrocm-runtime-dev`) -- both gaps are worked
   around explicitly in the `rocm-builder` stage; validated end-to-end with a
-  real gfx1201 MIGraphX + PyTorch build against it.
+  real gfx1201 MIGraphX + PyTorch build against it, and separately confirmed
+  working (MIGraphX ONNX provider + GPU dispatch) on real gfx1010 (RDNA 1,
+  RX 5700 XT) hardware via the `audiomuse-rocm-plugin` worker image.
 
 ## GPU support
 
