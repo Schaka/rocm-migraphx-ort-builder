@@ -123,8 +123,9 @@ variable "RELEASE_TAG" { default = "" }
 variable "ROCM_RELEASE" { default = "" }
 
 # Nightly CI passes an explicit empty string here so wheel discovery floats on
-# pytorch's version too; a release build pins it. The non-empty default is what a
-# local build gets, matching the behaviour before this file existed.
+# pytorch's version too; a release build pins it. The non-empty default keeps a
+# plain local build reproducible (a fixed pytorch version) rather than silently
+# floating to whatever's newest.
 variable "PYTORCH_VERSION" { default = "v2.13.0" }
 
 variable "ORT_VERSION" { default = "v1.28.0" }

@@ -8,8 +8,8 @@
 # Note torchaudio's wheel is non-device-specific -- the same one works for every
 # GPU target, so no ROCM_ARCH is passed to the decision script (see
 # companion_decide_arch). It is still built per-arch by CI because the pipeline
-# itself is per-arch, and this is no more work than the per-arch rebuild that
-# used to happen inside the final job.
+# itself is per-arch, and rebuilding the same wheel choice per arch costs
+# nothing beyond the one extra decision-script call.
 FROM rocblas AS builder
 
 ENV TORCH_COMPANION=torchaudio

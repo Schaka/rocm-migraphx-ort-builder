@@ -268,6 +268,17 @@ the same ones. All are declared, with these defaults, in `docker-bake.hcl`.
   package if none match. `0` forces a full from-source build. Each of the three
   is its own bake target, so it can also be overridden for one of them alone
   (`--set torchaudio.args.USE_PREBUILT=0`).
+
+  In release mode (`ROCM_RELEASE` set), pytorch's own resolution is three
+  tiers, not a flat wheel-or-source choice: a real stable release on
+  `repo.amd.com`, then (if AMD hasn't published a clean release for that
+  exact `PYTORCH_VERSION`/`ROCM_RELEASE` pin -- e.g. `2.13.0` currently has
+  none under `7.14`, on any arch) a single self-consistent devreleases
+  nightly snapshot (`scripts/rocm-devrelease-snapshot.py`), then a full
+  source build. torchvision/torchaudio match whichever exact version
+  pytorch actually resolved to (read off the downloaded wheel filename),
+  not independently guessed -- see `scripts/torch-package-build-decide.sh`
+  for the exact tier logic.
 - `ORT_VERSION` (default `v1.28.0`) - onnxruntime git tag. Nightly always uses
   this default (never floated, unlike everything else); the manual release
   workflow can override it explicitly.

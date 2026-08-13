@@ -7,8 +7,7 @@ set -eux
 # For prebuilt wheels: outputs "PIP:<package>==<exact_version>:<index_url>"
 # The caller feeds this straight to `uv pip install <package>==<version> --index-url <url>`,
 # which resolves the correct Python-version wheel AND all transitive deps (rocm-sdk-core,
-# triton, etc.) automatically -- pip/uv's own dependency resolver replaces what used to be
-# a manual curl-one-wheel-file-and-hope step.
+# triton, etc.) automatically.
 #
 # What pip/uv CANNOT do: decide which nightly build to prefer. This script's discovery
 # functions sort the index themselves (`sort -V` + take the last match) and take the newest
