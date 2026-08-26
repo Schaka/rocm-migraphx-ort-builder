@@ -10,7 +10,7 @@ with otherwise-stable Torch/ORT. Grew into two separate things:
   building. Only ONNX Runtime's version stays fixed for now.
 - A **manual release** build, independent of AMD's own release cadence (which
   tends to lag): a `workflow_dispatch`-triggered pipeline with sane defaults
-  (ROCm 7.14, PyTorch 2.13) that pins every moving part explicitly, so a
+  (ROCm 7.14, PyTorch 2.14) that pins every moving part explicitly, so a
   reproducible build never depends on AMD shipping their own combined image on
   any particular schedule.
 
@@ -44,9 +44,13 @@ job already pulls. Each component lands in its own package:
   (see "Nightly ROCm base image" below). Arch-independent, built once before
   the arch matrix, not part of the per-arch tag scheme below.
 - `rocm-rocblas-builder:<arch>` -- ROCm with rocBLAS rebuilt from source. Only
-  exists for the arches that need it (`gfx900`, `gfx906`, `gfx90c`); MIGraphX
+  exists for the arches that may need it (`gfx900`, `gfx906`, `gfx90c`); MIGraphX
   and PyTorch both start from it there instead of each rebuilding rocBLAS
-  themselves
+  themselves. Whether it actually rebuilds is decided inside the stage: release
+  builds always rebuild (AMD's stable bases ship no kernels for these arches),
+  nightly builds only when their own base lacks the kernels -- a from-source
+  build is the fallback, never another version's prebuilt. On a nightly whose
+  base carries them (TheRock 10.x), the image is a passthrough over the base
 - `rocm-migraphx-builder:<arch>` -- from-source MIGraphX + ROCm deps in `/opt/rocm`
 - `rocm-migraphx-torch-builder:<arch>` -- PyTorch wheel
 - `rocm-torchvision-builder:<arch>` -- torchvision wheel (built against the PyTorch wheel above)
@@ -105,9 +109,12 @@ note.
 at all, only pinned version releases (confirmed against `repo.radeon.com`'s
 apt repo: version numbers, alpha/beta/rc, and a `latest` alias that just means
 "newest stable release", nothing rolling). So nightly instead self-builds the
-ROCm base from TheRock's own nightly `.deb` feed
-(`rocm.nightlies.amd.com/packages-multi-arch/deb`) via the `rocm-base` bake
-target, built and published once (`ghcr.io/<owner>/rocm-builder:latest`
+ROCm base from TheRock's nightly `.deb` feed
+(`nightly.repo.amd.com/rocm/core/packages/deb/`, the TheRock 10.x native
+package feed -- the old `rocm.nightlies.amd.com/packages-multi-arch/deb`
+layout is the legacy release stream, home to 7.14/10.0-rc artifacts only) via
+the `rocm-base` bake target, built and published once
+(`ghcr.io/<owner>/rocm-builder:latest`
 and `:<YYYYMMDD>`) before the per-arch matrix runs, not per-arch -- it's
 arch-independent (`amdrocm-hpc-sdk` covers every gfx target in one package).
 
@@ -257,12 +264,14 @@ the same ones. All are declared, with these defaults, in `docker-bake.hcl`.
 - `ROCM_RELEASE` (default empty, `X.Y` e.g. `7.14`) - pins two things
   together: pytorch/torchvision/torchaudio's prebuilt-wheel discovery, and
   (for `gfx900`/`gfx906`/`gfx90c` only) the ROCm line rocBLAS is rebuilt from
-  source against. Empty means both float independently -- wheel discovery
-  takes whatever's newest (see "Nightly ROCm versioning" above), rocBLAS
-  builds from rocm-libraries' own `develop` branch instead of a pinned
-  `therock-<release>` tag. Must match `BASE_IMAGE` when set; the manual
-  release workflow derives all three from one `rocm_version` input so they
-  can't drift apart.
+  source against -- release always rebuilds for those arches; nightly never
+  substitutes another version's kernels, rebuilding only when its own base
+  lacks them. Empty means both float independently -- wheel discovery
+  takes whatever's newest (see "Nightly ROCm versioning" above), and a rocBLAS
+  rebuild (nightly, when needed) builds from rocm-libraries' own `develop`
+  branch instead of a pinned `therock-<release>` tag. Must match `BASE_IMAGE`
+  when set; the manual release workflow derives all three from one
+  `rocm_version` input so they can't drift apart.
 - `MIGRAPHX_REF` (default `develop`) - git ref to build MIGraphX from. The
   manual release workflow overrides this to `release/rocm-rel-<version>`.
 - `USE_PREBUILT` (default `1`) - try AMD's prebuilt wheels first for
@@ -274,17 +283,17 @@ the same ones. All are declared, with these defaults, in `docker-bake.hcl`.
   In release mode (`ROCM_RELEASE` set), pytorch's own resolution is three
   tiers, not a flat wheel-or-source choice: a real stable release on
   `repo.amd.com`, then (if AMD hasn't published a clean release for that
-  exact `PYTORCH_VERSION`/`ROCM_RELEASE` pin -- e.g. `2.13.0` currently has
-  none under `7.14`, on any arch) a single self-consistent devreleases
+  exact `PYTORCH_VERSION`/`ROCM_RELEASE` pin -- some pins have none for the
+  pinned ROCm line, on any arch) a single self-consistent devreleases
   nightly snapshot (`scripts/rocm-devrelease-snapshot.py`), then a full
   source build. torchvision/torchaudio match whichever exact version
   pytorch actually resolved to (read off the downloaded wheel filename),
   not independently guessed -- see `scripts/torch-package-build-decide.sh`
   for the exact tier logic.
-- `ORT_VERSION` (default `v1.28.0`) - onnxruntime git tag. Nightly always uses
+- `ORT_VERSION` (default `v1.29.0`) - onnxruntime git tag. Nightly always uses
   this default (never floated, unlike everything else); the manual release
   workflow can override it explicitly.
-- `PYTORCH_VERSION` (default `v2.13.0`) - has two roles depending on
+- `PYTORCH_VERSION` (default `v2.14.0`) - has two roles depending on
   `ROCM_RELEASE`: in release mode (`ROCM_RELEASE` set) it's an exact pin, both
   for prebuilt-wheel discovery and the from-source fallback branch. In
   nightly mode (`ROCM_RELEASE` empty) it's an *optional* pin -- if set,
@@ -324,7 +333,7 @@ BASE_IMAGE=rocm/dev-ubuntu-26.04:7.14.0-full \
 ROCM_RELEASE=7.14 \
 MIGRAPHX_REF=release/rocm-rel-7.14 \
 RELEASE_TAG=rocm7.14 \
-PYTORCH_VERSION=v2.13.0 \
+PYTORCH_VERSION=v2.14.0 \
   docker buildx bake final
 ```
 
@@ -367,7 +376,7 @@ PAT required.
 Trigger via the Actions tab -> "Release build" -> "Run workflow", or:
 
 ```
-gh workflow run release.yml -f rocm_version=7.14 -f pytorch_version=2.13.0
+gh workflow run release.yml -f rocm_version=7.14 -f pytorch_version=2.14.0
 ```
 
 Inputs, all optional with sane defaults:
@@ -381,8 +390,8 @@ Inputs, all optional with sane defaults:
   `rocm_version` when set explicitly -- e.g. pin ROCm/PyTorch/ORT to 7.14
   while still tracking MIGraphX's `develop` for a fix that hasn't landed on
   the `release/rocm-rel-7.14` branch yet.
-- `pytorch_version` (default `2.13.0`) - exact pytorch version to pin.
-- `ort_version` (default `v1.28.0`) - onnxruntime git tag.
+- `pytorch_version` (default `2.14.0`) - exact pytorch version to pin.
+- `ort_version` (default `v1.29.0`) - onnxruntime git tag.
 - `use_prebuilt` (default `true`) - try AMD's prebuilt wheels first for
   pytorch/torchvision/torchaudio, falling back to source per-package if none
   match; `false` forces a full from-source build of all three.

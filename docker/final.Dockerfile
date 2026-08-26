@@ -17,8 +17,8 @@ FROM python-base
 # PyTorch links hipBLASLt unconditionally regardless of arch
 # (cmake/Dependencies.cmake), but hipBLASLt's own Tensile Logic tree has never
 # had gfx900/gfx906/gfx90c kernels (oldest arch present is arcturus/gfx908) -- 0
-# forces GEMMs onto the rocBLAS rebuilt in the rocblas target instead of a
-# library with nothing to dispatch to.
+# forces GEMMs onto rocBLAS, which the rocblas stage serves for these arches
+# (rebuilt or prebuilt), instead of a library with nothing to dispatch to.
 ARG TORCH_BLAS_PREFER_HIPBLASLT
 ENV TORCH_BLAS_PREFER_HIPBLASLT=${TORCH_BLAS_PREFER_HIPBLASLT}
 

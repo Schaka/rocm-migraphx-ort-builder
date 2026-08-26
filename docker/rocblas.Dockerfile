@@ -1,14 +1,16 @@
 # syntax=docker/dockerfile:1
 #
-# Rebuilds rocBLAS from source for gfx900/gfx906/gfx90c; a no-op passthrough for
-# every other arch, which keeps the base image's own prebuilt rocBLAS (that one
-# does have their kernels).
-#
-# AMD's prebuilt rocBLAS package for this ROCm line ships no
-# gfx900/gfx906/gfx90c code objects at all (confirmed: no
-# amdrocm-blas*-gfx900/-gfx906/-gfx90c apt package exists, and the base image's
-# Tensile library on disk has no gfx900/gfx906/gfx90c folder) -- but the *source*
-# still carries them, so rebuilding covers them without a ROCm-major downgrade.
+# Serves rocBLAS to every torch-side and MIGraphX target for the legacy GCN
+# arches (gfx900/gfx906/gfx90c), where the base image's prebuilt rocBLAS may not
+# have usable kernels. The script self-decides (see rocblas.sh):
+#   - release builds always rebuild from source -- AMD's pinned stable bases ship
+#     no kernels for these arches, and upstream marks them build-passing but not
+#     sanity-tested, so a version-targeted build never trusts the prebuilt.
+#   - nightly builds use the base's prebuilt kernels when present for this exact
+#     base, and rebuild from source when absent (never substituting another
+#     version's kernels).
+# A no-op passthrough on every other arch, which keeps the base's own prebuilt
+# rocBLAS.
 #
 # Every torch-side and MIGraphX target builds FROM this one, so both see the
 # rebuilt rocBLAS when it applies. On gfx900/gfx906/gfx90c, CI overrides this

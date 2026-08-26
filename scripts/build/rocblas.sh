@@ -1,7 +1,17 @@
 #!/bin/sh
-# Rebuilds rocBLAS from source for the legacy GCN arches only; a no-op
-# passthrough on every other arch, which keeps the base image's own prebuilt
-# rocBLAS (that one does have their kernels).
+# Builds rocBLAS from source for the legacy GCN arches (gfx900/gfx906/gfx90c)
+# wherever the base image's prebuilt rocBLAS can't be trusted to serve them:
+#   - release builds (ROCM_RELEASE set) always rebuild. AMD's pinned stable
+#     bases ship no kernels for these arches at all (7.14 and 10.0 stable have
+#     no gfx900/gfx906/gfx90c blas packages), and upstream marks them
+#     build-passing but not sanity-tested (TheRock SUPPORTED_GPUS.md), so a
+#     version-targeted build never trusts the prebuilt.
+#   - nightly builds use the base's prebuilt kernels when they are actually
+#     present in this exact base image, and rebuild only when absent -- the
+#     fallback is a from-source build, never a substitution of another
+#     version's kernels. The presence check runs against the /opt/rocm in this
+#     container, so it always answers for the right version.
+# A no-op passthrough on every other arch.
 # Inputs (build-args): ROCM_ARCH, ROCM_RELEASE, BUILD_PARALLEL_LEVEL,
 # LEGACY_GCN_ARCHES.
 set -eux
@@ -12,6 +22,16 @@ set -eux
 if ! is_legacy_gcn_arch "${ROCM_ARCH}"; then
     echo "rocblas: ${ROCM_ARCH} uses the base image's prebuilt rocBLAS, no rebuild needed"
     exit 0
+fi
+
+if [ -z "${ROCM_RELEASE}" ]; then
+    if find -L /opt/rocm -iname "*TensileLibrary*${ROCM_ARCH}*" | grep -q .; then
+        echo "rocblas: nightly base ships ${ROCM_ARCH} rocBLAS kernels, using prebuilt -- no rebuild"
+        exit 0
+    fi
+    echo "rocblas: nightly base has no ${ROCM_ARCH} rocBLAS kernels -- building from source"
+else
+    echo "rocblas: release build (ROCM_RELEASE=${ROCM_RELEASE}) -- rebuilding from source, never trusting prebuilt"
 fi
 
 apt-get update

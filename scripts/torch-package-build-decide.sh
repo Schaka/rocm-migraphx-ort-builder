@@ -87,6 +87,7 @@ determine_rocm_pytorch_branch() {
     local base_branch
 
     case "$pytorch_version" in
+        v2.14.0)  base_branch="release/2.14" ;;
         v2.13.0)  base_branch="release/2.13" ;;
         v2.12.0)  base_branch="release/2.12" ;;
         v2.11.0)  base_branch="release/2.11" ;;
@@ -102,10 +103,23 @@ determine_rocm_pytorch_branch() {
     echo "$base_branch"
 }
 
+# torchvision does not track torch's version number (upstream pairs torch 2.N with
+# vision 0.(N+15) through 2.13: 2.13->0.28, 2.12->0.27, 2.11->0.26; torch 2.14
+# still ships with vision 0.28 -- 0.29 is not yet released), so the source branch
+# must be derived per pytorch version, not hardcoded.
 determine_torchvision_repo_branch() {
     local pytorch_version=$1
     local repo="pytorch/vision"
-    local branch="release/0.28"  # Covers 0.28.x versions
+    local branch
+
+    case "$pytorch_version" in
+        v2.14.0)  branch="release/0.28" ;;
+        v2.13.0)  branch="release/0.28" ;;
+        v2.12.0)  branch="release/0.27" ;;
+        v2.11.0)  branch="release/0.26" ;;
+        ""|develop) branch="main" ;;
+        *)        log "Unknown PyTorch version: $pytorch_version"; return 1 ;;
+    esac
 
     log "Using torchvision branch: $branch"
     echo "$repo;$branch"
@@ -257,11 +271,13 @@ torchaudio_find_stable_release_version() {
     extract_version "$(echo "$matches" | tail -1)" "torchaudio"
 }
 
-# torchvision does NOT track torch's version; upstream pairs torch 2.N with torchvision
-# 0.(N+15) (2.10->0.25, 2.11->0.26, 2.12->0.27, all confirmed present together on this index).
-# Derive that exact pairing and ask for it specifically; anything unexpected falls through to
-# the existing date-tag path and ultimately to a source build, and the companion ABI gate
-# re-checks the result either way.
+# torchvision does NOT track torch's version; upstream pairs torch 2.N with vision
+# 0.(N+15) through 2.13 (2.10->0.25, 2.11->0.26, 2.12->0.27, 2.13->0.28, all
+# confirmed present together on this index), but torch 2.14 still ships with
+# vision 0.28 -- 0.29 is not yet released, so the pairing must be explicit, not
+# arithmetic. Anything unexpected falls through to the existing date-tag path and
+# ultimately to a source build, and the companion ABI gate re-checks the result
+# either way.
 torchvision_find_stable_release_version() {
     local arch=$1
     local torch_version=$2
@@ -274,7 +290,15 @@ torchvision_find_stable_release_version() {
     case "$torch_minor" in
         ''|*[!0-9]*) log "Cannot derive torchvision version from torch=$torch_version"; return 1 ;;
     esac
-    local vision_minor=$((torch_minor + 15))
+    local vision_minor
+    case "$torch_minor" in
+        14) vision_minor=28 ;;
+        13) vision_minor=28 ;;
+        12) vision_minor=27 ;;
+        11) vision_minor=26 ;;
+        10) vision_minor=25 ;;
+        *)  log "No known torchvision pairing for torch 2.${torch_minor}"; return 1 ;;
+    esac
 
     log "Checking stable release (repo.amd.com) torchvision: $arch torch=$torch_version -> 0.${vision_minor}.x rocm=$rocm_release"
 

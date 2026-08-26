@@ -1,11 +1,18 @@
 # shellcheck shell=sh
 # Sourced, never executed.
 #
-# Single predicate for the arches that need the rocBLAS-from-source /
-# composable_kernel-off / hipBLASLt-off special-casing spread across the
-# rocblas, migraphx and pytorch stages: AMD's prebuilt packages for this ROCm
-# line ship no gfx900/gfx906/gfx90c code objects at all, in rocBLAS, hipBLASLt,
-# or composable_kernel.
+# Single predicate for the arches that keep the legacy-GCN special-casing spread
+# across the rocblas, migraphx and pytorch stages.
+#
+# The pieces and why:
+#   - rocBLAS: rebuilt from source when the base can't serve these arches -- a
+#     release build always does (AMD's stable bases ship no kernels for them),
+#     a nightly does only when its own base lacks them (see rocblas.sh). TheRock
+#     10.x nightly bases do carry their kernels; hipBLASLt never does.
+#   - hipBLASLt: off for these arches always -- no gfx900/gfx906/gfx90c kernels
+#     exist in any prebuilt package.
+#   - composable_kernel: denylisted for these arches at CK's own CMake configure
+#     time, so MIGraphX/PyTorch build with it disabled for them always.
 #
 # The arch LIST lives in docker-bake.hcl (variable "LEGACY_GCN_ARCHES"), which
 # passes it to every stage that needs it as a build-arg. It has to live there

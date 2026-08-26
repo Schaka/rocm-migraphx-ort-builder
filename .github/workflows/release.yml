@@ -39,13 +39,13 @@ on:
         required: false
         default: ''
       pytorch_version:
-        description: 'PyTorch version to pin (X.Y.Z, no "v" prefix). Resolved in order: a clean stable release on repo.amd.com; failing that, a devreleases build (matched to this exact version and rocm_version, substituting only what AMD never gave a clean release, see rocm-devrelease-snapshot.py); failing that, a full source build. So a pin without a clean AMD release for this rocm_version (as 2.13.0 currently has none under 7.14, on any arch) still builds -- just via one of the fallback tiers instead of a stable wheel.'
+        description: 'PyTorch version to pin (X.Y.Z, no "v" prefix). Resolved in order: a clean stable release on repo.amd.com; failing that, a devreleases build (matched to this exact version and rocm_version, substituting only what AMD never gave a clean release, see rocm-devrelease-snapshot.py); failing that, a full source build. So a pin without a clean AMD release for this rocm_version still builds -- just via one of the fallback tiers instead of a stable wheel.'
         required: false
-        default: '2.13.0'
+        default: '2.14.0'
       ort_version:
-        description: 'ONNX Runtime git tag to build (e.g. "v1.28.0").'
+        description: 'ONNX Runtime git tag to build (e.g. "v1.29.0").'
         required: false
-        default: 'v1.28.0'
+        default: 'v1.29.0'
       use_prebuilt:
         description: 'Try prebuilt AMD wheels for pytorch/torchvision/torchaudio first (falls back to source per-package if none match). Uncheck to force a full from-source build of all three.'
         type: boolean

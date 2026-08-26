@@ -1,4 +1,4 @@
-# Build graph for the ROCm 7 pipeline. One target per component, one Dockerfile
+# Build graph for the ROCm pipeline. One target per component, one Dockerfile
 # per target under docker/.
 #
 #   python-base ──┬─ rocblas ──┬─ migraphx ── ort ──┐
@@ -6,6 +6,12 @@
 #                 │            ├─ torchvision ──────┤
 #                 │            └─ torchaudio ───────┘
 #                 └─ (ort and final also start from python-base directly)
+#
+#   rocblas serves the legacy GCN arches (gfx900/gfx906/gfx90c) in both modes --
+#   its script self-decides whether the base needs a rebuild (release always
+#   rebuilds; nightly uses the base's prebuilt kernels when present, rebuilds only
+#   when absent). Every other arch starts from python-base directly and the
+#   rocblas target is dropped from the graph -- see rocblas_ctx below.
 #
 #   rocm-base is standalone: the self-built ROCm base image BASE_IMAGE defaults
 #   to. It is arch-independent and built once, ahead of the arch matrix.
@@ -90,10 +96,15 @@ variable "ROCM_ARCH" {
   default = "gfx900;gfx90c;gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201"
 }
 
-# Arches whose prebuilt ROCm packages carry no code objects at all -- not in
-# rocBLAS, not in hipBLASLt, not in composable_kernel. Drives the rocBLAS
-# from-source rebuild, the composable_kernel/hipBLASLt opt-outs, and the final
-# image's TORCH_BLAS_PREFER_HIPBLASLT. Single source of truth: the build scripts
+# Arches that keep the legacy special-casing. In a RELEASE build (ROCM_RELEASE
+# set) AMD's pinned stable base image ships no code objects for these -- not in
+# rocBLAS, not in hipBLASLt -- so rocBLAS is rebuilt from source there (they're
+# also not sanity-tested/release-ready upstream, see TheRock's SUPPORTED_GPUS.md,
+# so release builds don't trust the prebuilt either). In NIGHTLY builds TheRock
+# 10.x's per-arch amdrocm-blas packages DO carry kernels for these (build
+# passing upstream), so the rebuild is skipped there and only the
+# composable_kernel/hipBLASLt opt-outs (and the final image's
+# TORCH_BLAS_PREFER_HIPBLASLT) apply. Single source of truth: the build scripts
 # read this same value (see scripts/lib/legacy-arch.sh). Extend it here.
 variable "LEGACY_GCN_ARCHES" { default = "gfx900 gfx906 gfx90c" }
 
@@ -103,7 +114,13 @@ variable "LEGACY_GCN_ARCHES" { default = "gfx900 gfx906 gfx90c" }
 # release workflow overrides this to AMD's own pinned tag.
 variable "BASE_IMAGE" { default = "ghcr.io/schaka/rocm-builder:latest" }
 
-variable "THEROCK_DEB_INDEX" { default = "https://rocm.nightlies.amd.com/packages-multi-arch/deb/" }
+# TheRock 10.x native package feed (rocm-base consumes this). The legacy
+# multi-arch feed (rocm.nightlies.amd.com/packages-multi-arch/deb) is the
+# "legacy release stream" now owned by ROCm/legacy-rocm-build -- ROCm 7.14
+# nightlies and 10.0.0 release candidates still live there, but 10.x nightlies
+# publish here under the same package names and dated-directory layout (TheRock
+# RELEASES.md). Stable 10.x pins use stable.repo.amd.com/rocm/core/packages/deb/.
+variable "THEROCK_DEB_INDEX" { default = "https://nightly.repo.amd.com/rocm/core/packages/deb/" }
 
 # Git ref to build MIGraphX from. The moving `develop` branch by default;
 # override to pin a stable release branch (e.g. release/rocm-rel-7.13) when
@@ -126,9 +143,9 @@ variable "ROCM_RELEASE" { default = "" }
 # pytorch's version too; a release build pins it. The non-empty default keeps a
 # plain local build reproducible (a fixed pytorch version) rather than silently
 # floating to whatever's newest.
-variable "PYTORCH_VERSION" { default = "v2.13.0" }
+variable "PYTORCH_VERSION" { default = "v2.14.0" }
 
-variable "ORT_VERSION" { default = "v1.28.0" }
+variable "ORT_VERSION" { default = "v1.29.0" }
 
 # "1" tries AMD's prebuilt wheels for pytorch/torchvision/torchaudio first,
 # falling back to source per package; "0" forces a full from-source build.
@@ -221,6 +238,20 @@ function "ctx" {
   result = use_image == "true" ? "docker-image://${image(component)}" : "target:${component}"
 }
 
+# rocblas context: the from-source rocBLAS stage serves the legacy GCN arches
+# (gfx900/gfx906/gfx90c) in BOTH modes -- its script self-decides whether the
+# base needs a rebuild (see rocblas.sh):
+#   - release builds always rebuild (never trust prebuilt for these arches);
+#   - nightly builds use the base's prebuilt kernels when present, rebuild only
+#     when absent.
+# Every other arch starts from python-base directly and the rocblas target is
+# dropped from the graph entirely. The CI-side wiring lives in build-pipeline.yml
+# (rocblas job + with-rocblas-image, gated on the legacy arch list).
+function "rocblas_ctx" {
+  params = [use_image]
+  result = use_image == "true" ? "docker-image://${image("rocblas")}" : (is_legacy_arch(ROCM_ARCH) ? "target:rocblas" : "target:python-base")
+}
+
 function "is_legacy_arch" {
   params = [arch]
   result = contains(split(" ", LEGACY_GCN_ARCHES), arch)
@@ -284,6 +315,11 @@ target "rocblas" {
     LEGACY_GCN_ARCHES    = LEGACY_GCN_ARCHES
     BUILD_PARALLEL_LEVEL = BUILD_PARALLEL_LEVEL
   }
+  # Only referenced from the graph for the legacy GCN arches (see rocblas_ctx).
+  # Its script self-decides whether a rebuild is needed: release builds always
+  # rebuild; nightly builds rebuild only when the base lacks that arch's kernels.
+  # When nothing needs it, this target is never built and every component starts
+  # from python-base directly.
   tags       = [image("rocblas")]
   cache-from = cache_from("rocblas")
   cache-to   = cache_to("rocblas")
@@ -292,7 +328,7 @@ target "rocblas" {
 target "migraphx" {
   inherits   = ["_common"]
   dockerfile = "docker/migraphx.Dockerfile"
-  contexts   = { rocblas = ctx("rocblas", WITH_ROCBLAS_IMAGE) }
+  contexts   = { rocblas = rocblas_ctx(WITH_ROCBLAS_IMAGE) }
   args = {
     ROCM_ARCH            = ROCM_ARCH
     LEGACY_GCN_ARCHES    = LEGACY_GCN_ARCHES
@@ -309,7 +345,7 @@ target "migraphx" {
 target "pytorch" {
   inherits   = ["_common"]
   dockerfile = "docker/pytorch.Dockerfile"
-  contexts   = { rocblas = ctx("rocblas", WITH_ROCBLAS_IMAGE) }
+  contexts   = { rocblas = rocblas_ctx(WITH_ROCBLAS_IMAGE) }
   args = {
     ROCM_ARCH            = ROCM_ARCH
     LEGACY_GCN_ARCHES    = LEGACY_GCN_ARCHES
@@ -327,7 +363,7 @@ target "torchvision" {
   inherits   = ["_common"]
   dockerfile = "docker/torchvision.Dockerfile"
   contexts = {
-    rocblas = ctx("rocblas", WITH_ROCBLAS_IMAGE)
+    rocblas = rocblas_ctx(WITH_ROCBLAS_IMAGE)
     pytorch = ctx("pytorch", WITH_PYTORCH_IMAGE)
   }
   args = {
@@ -346,7 +382,7 @@ target "torchaudio" {
   inherits   = ["_common"]
   dockerfile = "docker/torchaudio.Dockerfile"
   contexts = {
-    rocblas = ctx("rocblas", WITH_ROCBLAS_IMAGE)
+    rocblas = rocblas_ctx(WITH_ROCBLAS_IMAGE)
     pytorch = ctx("pytorch", WITH_PYTORCH_IMAGE)
   }
   args = {

@@ -70,7 +70,7 @@ on:
         type: string
         default: ''
       pytorch-version:
-        description: 'PYTORCH_VERSION override (e.g. "v2.13.0"). Empty floats fully -- what nightly wants.'
+        description: 'PYTORCH_VERSION override (e.g. "v2.14.0"). Empty floats fully -- what nightly wants.'
         required: false
         type: string
         default: ''
@@ -90,7 +90,7 @@ on:
         type: boolean
         default: true
       ort-version:
-        description: 'ORT_VERSION override (e.g. "v1.28.0"). Empty keeps docker-bake.hcl''s default.'
+        description: 'ORT_VERSION override (e.g. "v1.29.0"). Empty keeps docker-bake.hcl''s default.'
         required: false
         type: string
         default: ''
