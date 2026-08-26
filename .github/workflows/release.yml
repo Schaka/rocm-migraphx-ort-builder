@@ -6,13 +6,13 @@ name: Release build
 # version) to an immutable ROCm line via workflow inputs, no Dockerfile edit
 # required.
 #
-# rocm_version's major.minor (e.g. "7.14" out of "7.14.0") drives:
+# rocm_version's major.minor (e.g. "10.0" out of "10.0.0") drives:
 #   - migraphx-ref: release/rocm-rel-<major.minor>, MIGraphX's own stable
-#     branch for that ROCm line (not develop) -- unless the migraphx_ref
-#     input is set, which overrides this independently of rocm_version (e.g.
-#     pin ROCm/PyTorch/ORT to 7.14 while still tracking MIGraphX's develop).
+#     branch for that ROCm line -- falling back to develop when the branch
+#     doesn't exist yet (MIGraphX currently ships no release branch past 7.14).
+#     The migraphx_ref input overrides this independently of rocm_version.
 #   - release-tag: rocm<major.minor>, passed through build-pipeline.yml so
-#     build-component.yml publishes a single immutable "rocm7.14-<arch>"
+#     build-component.yml publishes a single immutable "rocm10.0-<arch>"
 #     final tag instead of the develop-tracking :latest-<arch>/:<date>-<arch>
 #     pair. Point downstream consumers at that tag for a stable, reproducible
 #     build.
@@ -31,11 +31,11 @@ on:
   workflow_dispatch:
     inputs:
       rocm_version:
-        description: 'ROCm version to pin (X.Y.Z), matching a real rocm/dev-ubuntu-26.04 tag and repo.radeon.com/rocm/apt/ release. Drives BASE_IMAGE, ROCM_RELEASE, and (unless migraphx_ref below overrides it) MIGRAPHX_REF.'
+        description: 'ROCm version to pin (X.Y.Z), matching a real rocm/dev-ubuntu-26.04 tag. Drives BASE_IMAGE, ROCM_RELEASE, and (unless migraphx_ref below overrides it) MIGRAPHX_REF.'
         required: false
-        default: '7.14.0'
+        default: '10.0.0'
       migraphx_ref:
-        description: 'Git ref to build MIGraphX from (branch/tag). Leave empty to derive release/rocm-rel-<rocm_version major.minor> automatically; set explicitly (e.g. "develop") to track it independently of rocm_version -- e.g. pin ROCm/PyTorch/ORT to 7.14 while MIGraphX still builds from develop.'
+        description: 'Git ref to build MIGraphX from (branch/tag). Leave empty to derive release/rocm-rel-<rocm_version major.minor> automatically, falling back to develop when that branch does not exist yet (MIGraphX has no release branch for ROCm 10 as of now); set explicitly (e.g. "develop") to track it independently of rocm_version.'
         required: false
         default: ''
       pytorch_version:
@@ -89,6 +89,16 @@ jobs:
             migraphx_ref="$MIGRAPHX_REF_INPUT"
           else
             migraphx_ref="release/rocm-rel-${major_minor}"
+            # MIGraphX lags the ROCm release train: as of ROCm 10 it has no
+            # release/rocm-rel-10.0 branch at all (latest is 7.14). Falling back
+            # to develop here makes the default just work, and automatically
+            # starts using the release branch the day upstream ships it -- an
+            # explicit migraphx_ref input still wins over both.
+            if ! git ls-remote --heads https://github.com/ROCm/AMDMIGraphX.git \
+                    "${migraphx_ref}" | grep -q .; then
+              echo "::warning::AMDMIGraphX has no ${migraphx_ref} branch; MIGraphX defaults to develop"
+              migraphx_ref="develop"
+            fi
           fi
           # One grouped redirect rather than five appends to the same file.
           {

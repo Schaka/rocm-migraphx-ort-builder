@@ -48,8 +48,8 @@ jobs:
           echo "::endgroup::"
 
           echo "::group::release variables"
-          ROCM_ARCH=gfx900 RELEASE_TAG=rocm7.14 ROCM_RELEASE=7.14 \
-          MIGRAPHX_REF=release/rocm-rel-7.14 BASE_IMAGE=rocm/dev-ubuntu-26.04:7.14.0-full \
+          ROCM_ARCH=gfx900 RELEASE_TAG=rocm10.0 ROCM_RELEASE=10.0 \
+          MIGRAPHX_REF=develop BASE_IMAGE=rocm/dev-ubuntu-26.04:10.0.0-full \
           PYTORCH_VERSION=v2.14.0 USE_PREBUILT=0 \
           WITH_ROCBLAS_IMAGE=true WITH_MIGRAPHX_IMAGE=true WITH_PYTORCH_IMAGE=true \
           WITH_TORCHVISION_IMAGE=true WITH_TORCHAUDIO_IMAGE=true WITH_ORT_IMAGE=true \
