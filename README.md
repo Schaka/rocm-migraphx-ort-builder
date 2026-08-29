@@ -10,8 +10,8 @@ with otherwise-stable Torch/ORT. Grew into two separate things:
   building. Only ONNX Runtime's version stays fixed for now.
 - A **manual release** build, independent of AMD's own release cadence (which
   tends to lag): a `workflow_dispatch`-triggered pipeline with sane defaults
-  (ROCm 10.0, PyTorch 2.14; MIGraphX tracks develop -- it has no release branch
-  for the 10.x line yet) that pins every moving part explicitly, so a
+  (ROCm 10.0, PyTorch 2.14; MIGraphX pins to `release/rocm-rel-10.0`) that
+  pins every moving part explicitly, so a
   reproducible build never depends on AMD shipping their own combined image on
   any particular schedule.
 
@@ -389,8 +389,7 @@ Inputs, all optional with sane defaults:
 - `migraphx_ref` (default empty = derive `release/rocm-rel-<rocm_version
   major.minor>`, falling back to `develop` when that branch doesn't exist) -
   git ref to build MIGraphX from, independent of `rocm_version` when set
-  explicitly. MIGraphX currently ships no release branch past 7.14, so the
-  10.0 default resolves to `develop` until upstream cuts a 10.x branch.
+  explicitly. The 10.0 default resolves to `release/rocm-rel-10.0`.
 - `pytorch_version` (default `2.14.0`) - exact pytorch version to pin.
 - `ort_version` (default `v1.29.0`) - onnxruntime git tag.
 - `use_prebuilt` (default `true`) - try AMD's prebuilt wheels first for
