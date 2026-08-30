@@ -158,4 +158,5 @@ jobs:
           # Printed first so a failed build has the fully resolved graph -- tags,
           # contexts, args, cache refs -- right above it in the log.
           docker buildx bake --print "$COMPONENT"
-          docker buildx bake --push "$COMPONENT"
+          source scripts/lib/bake-retry.sh
+          bake_push_with_retry "$COMPONENT"

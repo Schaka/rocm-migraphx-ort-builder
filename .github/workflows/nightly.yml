@@ -65,7 +65,8 @@ jobs:
           export SOURCE_DATE="$DATE"
 
           docker buildx bake --print rocm-base
-          docker buildx bake --push rocm-base
+          source scripts/lib/bake-retry.sh
+          bake_push_with_retry rocm-base
 
           # Read the tag back out of the resolved graph rather than re-deriving
           # it, so the matrix below can only ever consume what was just pushed.
