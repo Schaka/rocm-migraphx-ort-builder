@@ -48,8 +48,8 @@ jobs:
         with:
           # Nothing here compiles; it is an apt install and a symlink dance.
           swap-size-gb: '0'
-          registry-username: ${{ github.actor }}
-          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          registry-username: ${{ secrets.GHCR_PAT != '' && github.repository_owner || github.actor }}
+          registry-password: ${{ secrets.GHCR_PAT != '' && secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
 
       - name: Build and push rocm-base
         id: build

@@ -116,8 +116,8 @@ jobs:
         with:
           debug: ${{ inputs.debug }}
           swap-size-gb: ${{ inputs.swap-size-gb }}
-          registry-username: ${{ github.actor }}
-          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          registry-username: ${{ secrets.GHCR_PAT != '' && github.repository_owner || github.actor }}
+          registry-password: ${{ secrets.GHCR_PAT != '' && secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
 
       - name: Build and push ${{ inputs.component }}
         env:
