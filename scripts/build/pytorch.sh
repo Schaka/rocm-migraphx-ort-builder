@@ -60,7 +60,7 @@ build_pytorch_from_source() {
         MAX_JOBS="$jobs" USE_MKLDNN=0 USE_CCACHE=1 \
         USE_FLASH_ATTENTION=0 USE_MEM_EFF_ATTENTION=0 \
         USE_DISTRIBUTED=0 USE_ROCM_CK_GEMM="$ck_gemm" \
-        python3 setup.py bdist_wheel
+        python3 -m build --wheel --no-isolation
     cp dist/*.whl /pytorch/dist/
     cd /
     rm -rf /pytorch-src

@@ -30,7 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # native python3.
 RUN uv venv /build-venv --python 3.12 --seed \
     && uv pip install --python /build-venv/bin/python3 \
-        numpy pyyaml typing_extensions requests setuptools wheel six
+        numpy pyyaml typing_extensions requests setuptools wheel six build
 ENV PATH=/build-venv/bin:$PATH
 
 # Kept as its own layer: the decision is network-bound and cheap, the build below
