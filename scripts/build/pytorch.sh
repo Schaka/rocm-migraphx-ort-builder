@@ -40,6 +40,7 @@ build_pytorch_from_source() {
     git clone --recursive --branch "${branch}" --depth 1 --shallow-submodules \
         "https://github.com/${repo}.git" /pytorch-src
     cd /pytorch-src
+    pip install --no-cache-dir -r requirements.txt
     python3 tools/amd_build/build_amd.py
     # shellcheck disable=SC3045  # dash (this image's /bin/sh) does implement ulimit -s;
     # the PyTorch build overflows the default 8MB stack in template-heavy TUs.

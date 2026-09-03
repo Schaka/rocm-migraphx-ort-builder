@@ -10,6 +10,19 @@ ARG ORT_VERSION
 
 COPY --from=migraphx /opt/rocm /opt/rocm
 
+# ROCm 10.0 ships its own flatbuffers in /opt/rocm, and ORT's MIGraphX
+# provider sets CMAKE_PREFIX_PATH=/opt/rocm -- so ORT's flatbuffers
+# FetchContent declaration (a minimum-version FIND_PACKAGE_ARGS) find_package()s
+# the ROCm copy instead of downloading the version it pins, and the mismatched
+# headers fail ORT's own generated-schema static_assert
+# (FLATBUFFERS_VERSION_MAJOR mismatch). Removing the ROCm flatbuffers footprint
+# makes find_package fail so FetchContent downloads and builds the pinned
+# version instead. Nothing in ORT or the MIGraphX provider uses the ROCm copy.
+RUN rm -rf /opt/rocm/include/flatbuffers \
+        /opt/rocm/lib/cmake/flatbuffers \
+        /opt/rocm/lib/libflatbuffers.a \
+        /opt/rocm/lib/pkgconfig/flatbuffers.pc
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git cmake ninja-build build-essential pkg-config ccache \
     && rm -rf /var/lib/apt/lists/*
