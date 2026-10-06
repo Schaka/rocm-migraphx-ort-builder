@@ -10,7 +10,7 @@ ARG ORT_VERSION
 
 COPY --from=migraphx /opt/rocm /opt/rocm
 
-# ROCm 10.0 ships its own flatbuffers in /opt/rocm, and ORT's MIGraphX
+# ROCm 10.x ships its own flatbuffers in /opt/rocm, and ORT's MIGraphX
 # provider sets CMAKE_PREFIX_PATH=/opt/rocm -- so ORT's flatbuffers
 # FetchContent declaration (a minimum-version FIND_PACKAGE_ARGS) find_package()s
 # the ROCm copy instead of downloading the version it pins, and the mismatched

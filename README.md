@@ -10,7 +10,7 @@ with otherwise-stable Torch/ORT. Grew into two separate things:
   building. Only ONNX Runtime's version stays fixed for now.
 - A **manual release** build, independent of AMD's own release cadence (which
   tends to lag): a `workflow_dispatch`-triggered pipeline with sane defaults
-  (ROCm 10.0, PyTorch 2.14; MIGraphX pins to `release/rocm-rel-10.0`) that
+  (ROCm 10.1, PyTorch 2.14; MIGraphX pins to `release/rocm-rel-10.1`) that
   pins every moving part explicitly, so a
   reproducible build never depends on AMD shipping their own combined image on
   any particular schedule.
@@ -65,9 +65,9 @@ stack); downstream consumers want the combined `rocm-migraphx-ort-torch-builder`
 
 A **manual release build** (see "Manual release build" below) tags every
 component differently: `rocblas`/`migraphx`/`pytorch`/`torchvision`/`torchaudio`/`ort` each publish as
-`<arch>-rocm<version>` (e.g. `gfx1201-rocm10.0`) instead of the nightly
+`<arch>-rocm<version>` (e.g. `gfx1201-rocm10.1`) instead of the nightly
 scheme's plain `<arch>`, and the combined image publishes as
-`rocm<version>-<arch>` (e.g. `rocm10.0-gfx1201`) instead of `latest-<arch>`/
+`rocm<version>-<arch>` (e.g. `rocm10.1-gfx1201`) instead of `latest-<arch>`/
 `<YYYYMMDD>-<arch>`. This applies to every component, not just the final
 image -- `rocblas` and `pytorch` both genuinely vary by ROCm release (rocblas
 is rebuilt from a version-pinned source ref; pytorch's own version/ROCm-release
@@ -205,7 +205,7 @@ RUN "$VIRTUAL_ENV_TORCH/bin/python3" -c "import torch; print(torch.__version__)"
 
 The combined image (`rocm-migraphx-ort-torch-builder`) is tagged per-arch:
 `:latest-<arch>` (e.g. `:latest-gfx1201`) and `:<YYYYMMDD>-<arch>` for nightly
-builds, or `:rocm<version>-<arch>` (e.g. `:rocm10.0-gfx1201`) for a manual
+builds, or `:rocm<version>-<arch>` (e.g. `:rocm10.1-gfx1201`) for a manual
 release build -- there is no plain `:latest`, pick the tag matching your GPU's
 `ROCM_ARCH` value (and whichever build track you want).
 
@@ -262,7 +262,7 @@ the same ones. All are declared, with these defaults, in `docker-bake.hcl`.
   `PYTORCH_ROCM_ARCH` list, matching the breadth AMD's own published images
   build for. Narrow it to your one GPU for a much faster build, e.g.
   `ROCM_ARCH=gfx1201`.
-- `ROCM_RELEASE` (default empty, `X.Y` e.g. `10.0`) - pins two things
+- `ROCM_RELEASE` (default empty, `X.Y` e.g. `10.1`) - pins two things
   together: pytorch/torchvision/torchaudio's prebuilt-wheel discovery, and
   (for `gfx900`/`gfx906`/`gfx90c` only) the ROCm line rocBLAS is rebuilt from
   source against -- release always rebuilds for those arches; nightly never
@@ -330,10 +330,10 @@ reproduction of what the release workflow builds:
 
 ```
 ROCM_ARCH=gfx1201 \
-BASE_IMAGE=rocm/dev-ubuntu-26.04:10.0.0-full \
-ROCM_RELEASE=10.0 \
+BASE_IMAGE=rocm/dev-ubuntu-26.04:10.1.0-full \
+ROCM_RELEASE=10.1 \
 MIGRAPHX_REF=develop \
-RELEASE_TAG=rocm10.0 \
+RELEASE_TAG=rocm10.1 \
 PYTORCH_VERSION=v2.14.0 \
   docker buildx bake final
 ```
@@ -377,19 +377,19 @@ PAT required.
 Trigger via the Actions tab -> "Release build" -> "Run workflow", or:
 
 ```
-gh workflow run release.yml -f rocm_version=10.0 -f pytorch_version=2.14.0
+gh workflow run release.yml -f rocm_version=10.1 -f pytorch_version=2.14.0
 ```
 
 Inputs, all optional with sane defaults:
 
-- `rocm_version` (default `10.0.0`) - ROCm version to pin (`X.Y[.Z]`), must
+- `rocm_version` (default `10.1.0`) - ROCm version to pin (`X.Y[.Z]`), must
   match a real `rocm/dev-ubuntu-26.04` tag. Drives `BASE_IMAGE`,
   `ROCM_RELEASE`, and (unless `migraphx_ref` below overrides it)
   `MIGRAPHX_REF`.
 - `migraphx_ref` (default empty = derive `release/rocm-rel-<rocm_version
   major.minor>`, falling back to `develop` when that branch doesn't exist) -
   git ref to build MIGraphX from, independent of `rocm_version` when set
-  explicitly. The 10.0 default resolves to `release/rocm-rel-10.0`.
+  explicitly. The 10.1 default resolves to `release/rocm-rel-10.1`.
 - `pytorch_version` (default `2.14.0`) - exact pytorch version to pin.
 - `ort_version` (default `v1.29.0`) - onnxruntime git tag.
 - `use_prebuilt` (default `true`) - try AMD's prebuilt wheels first for
