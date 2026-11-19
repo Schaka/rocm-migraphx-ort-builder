@@ -143,7 +143,7 @@ variable "ROCM_RELEASE" { default = "" }
 # pytorch's version too; a release build pins it. The non-empty default keeps a
 # plain local build reproducible (a fixed pytorch version) rather than silently
 # floating to whatever's newest.
-variable "PYTORCH_VERSION" { default = "v2.14.0" }
+variable "PYTORCH_VERSION" { default = "v2.15.0" }
 
 variable "ORT_VERSION" { default = "v1.29.0" }
 

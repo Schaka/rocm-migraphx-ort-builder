@@ -10,8 +10,8 @@ with otherwise-stable Torch/ORT. Grew into two separate things:
   building. Only ONNX Runtime's version stays fixed for now.
 - A **manual release** build, independent of AMD's own release cadence (which
   tends to lag): a `workflow_dispatch`-triggered pipeline with sane defaults
-  (ROCm 10.1, PyTorch 2.14; MIGraphX pins to `release/rocm-rel-10.1`) that
-  pins every moving part explicitly, so a
+  (ROCm 10.2, PyTorch 2.15; MIGraphX tracks `develop` until upstream cuts
+  `release/rocm-rel-10.2`) that pins every moving part explicitly, so a
   reproducible build never depends on AMD shipping their own combined image on
   any particular schedule.
 
@@ -65,9 +65,9 @@ stack); downstream consumers want the combined `rocm-migraphx-ort-torch-builder`
 
 A **manual release build** (see "Manual release build" below) tags every
 component differently: `rocblas`/`migraphx`/`pytorch`/`torchvision`/`torchaudio`/`ort` each publish as
-`<arch>-rocm<version>` (e.g. `gfx1201-rocm10.1`) instead of the nightly
+`<arch>-rocm<version>` (e.g. `gfx1201-rocm10.2`) instead of the nightly
 scheme's plain `<arch>`, and the combined image publishes as
-`rocm<version>-<arch>` (e.g. `rocm10.1-gfx1201`) instead of `latest-<arch>`/
+`rocm<version>-<arch>` (e.g. `rocm10.2-gfx1201`) instead of `latest-<arch>`/
 `<YYYYMMDD>-<arch>`. This applies to every component, not just the final
 image -- `rocblas` and `pytorch` both genuinely vary by ROCm release (rocblas
 is rebuilt from a version-pinned source ref; pytorch's own version/ROCm-release
@@ -205,7 +205,7 @@ RUN "$VIRTUAL_ENV_TORCH/bin/python3" -c "import torch; print(torch.__version__)"
 
 The combined image (`rocm-migraphx-ort-torch-builder`) is tagged per-arch:
 `:latest-<arch>` (e.g. `:latest-gfx1201`) and `:<YYYYMMDD>-<arch>` for nightly
-builds, or `:rocm<version>-<arch>` (e.g. `:rocm10.1-gfx1201`) for a manual
+builds, or `:rocm<version>-<arch>` (e.g. `:rocm10.2-gfx1201`) for a manual
 release build -- there is no plain `:latest`, pick the tag matching your GPU's
 `ROCM_ARCH` value (and whichever build track you want).
 
@@ -262,7 +262,7 @@ the same ones. All are declared, with these defaults, in `docker-bake.hcl`.
   `PYTORCH_ROCM_ARCH` list, matching the breadth AMD's own published images
   build for. Narrow it to your one GPU for a much faster build, e.g.
   `ROCM_ARCH=gfx1201`.
-- `ROCM_RELEASE` (default empty, `X.Y` e.g. `10.1`) - pins two things
+- `ROCM_RELEASE` (default empty, `X.Y` e.g. `10.2`) - pins two things
   together: pytorch/torchvision/torchaudio's prebuilt-wheel discovery, and
   (for `gfx900`/`gfx906`/`gfx90c` only) the ROCm line rocBLAS is rebuilt from
   source against -- release always rebuilds for those arches; nightly never
@@ -282,8 +282,9 @@ the same ones. All are declared, with these defaults, in `docker-bake.hcl`.
   (`--set torchaudio.args.USE_PREBUILT=0`).
 
   In release mode (`ROCM_RELEASE` set), pytorch's own resolution is three
-  tiers, not a flat wheel-or-source choice: a real stable release on
-  `repo.amd.com`, then (if AMD hasn't published a clean release for that
+  tiers, not a flat wheel-or-source choice: a real stable release on AMD's
+  stable index (`repo.amd.com` for 7.x, `stable.repo.amd.com/rocm/whl-next`
+  for 10.x), then (if AMD hasn't published a clean release for that
   exact `PYTORCH_VERSION`/`ROCM_RELEASE` pin -- some pins have none for the
   pinned ROCm line, on any arch) a single self-consistent devreleases
   nightly snapshot (`scripts/rocm-devrelease-snapshot.py`), then a full
@@ -294,7 +295,7 @@ the same ones. All are declared, with these defaults, in `docker-bake.hcl`.
 - `ORT_VERSION` (default `v1.29.0`) - onnxruntime git tag. Nightly always uses
   this default (never floated, unlike everything else); the manual release
   workflow can override it explicitly.
-- `PYTORCH_VERSION` (default `v2.14.0`) - has two roles depending on
+- `PYTORCH_VERSION` (default `v2.15.0`) - has two roles depending on
   `ROCM_RELEASE`: in release mode (`ROCM_RELEASE` set) it's an exact pin, both
   for prebuilt-wheel discovery and the from-source fallback branch. In
   nightly mode (`ROCM_RELEASE` empty) it's an *optional* pin -- if set,
@@ -330,11 +331,11 @@ reproduction of what the release workflow builds:
 
 ```
 ROCM_ARCH=gfx1201 \
-BASE_IMAGE=rocm/dev-ubuntu-26.04:10.1.0-full \
-ROCM_RELEASE=10.1 \
+BASE_IMAGE=rocm/dev-ubuntu-26.04:10.2.0-full \
+ROCM_RELEASE=10.2 \
 MIGRAPHX_REF=develop \
-RELEASE_TAG=rocm10.1 \
-PYTORCH_VERSION=v2.14.0 \
+RELEASE_TAG=rocm10.2 \
+PYTORCH_VERSION=v2.15.0 \
   docker buildx bake final
 ```
 
@@ -377,20 +378,24 @@ PAT required.
 Trigger via the Actions tab -> "Release build" -> "Run workflow", or:
 
 ```
-gh workflow run release.yml -f rocm_version=10.1 -f pytorch_version=2.14.0
+gh workflow run release.yml -f rocm_version=10.2 -f pytorch_version=2.15.0
 ```
 
 Inputs, all optional with sane defaults:
 
-- `rocm_version` (default `10.1.0`) - ROCm version to pin (`X.Y[.Z]`), must
+- `rocm_version` (default `10.2.0`) - ROCm version to pin (`X.Y[.Z]`), must
   match a real `rocm/dev-ubuntu-26.04` tag. Drives `BASE_IMAGE`,
   `ROCM_RELEASE`, and (unless `migraphx_ref` below overrides it)
   `MIGRAPHX_REF`.
 - `migraphx_ref` (default empty = derive `release/rocm-rel-<rocm_version
   major.minor>`, falling back to `develop` when that branch doesn't exist) -
   git ref to build MIGraphX from, independent of `rocm_version` when set
-  explicitly. The 10.1 default resolves to `release/rocm-rel-10.1`.
-- `pytorch_version` (default `2.14.0`) - exact pytorch version to pin.
+  explicitly. MIGraphX has no `release/rocm-rel-10.2` branch yet, so the 10.2
+  default resolves to `develop` (already at MIGraphX 2.19.0, the version ROCm
+  10.2 ships) until upstream cuts it.
+- `pytorch_version` (default `2.15.0`) - exact pytorch version to pin. On
+  ROCm 10.2, 2.15.0 is the only PyTorch AMD supports on every GPU; 2.14.0 and
+  2.13.0 are Instinct-only there.
 - `ort_version` (default `v1.29.0`) - onnxruntime git tag.
 - `use_prebuilt` (default `true`) - try AMD's prebuilt wheels first for
   pytorch/torchvision/torchaudio, falling back to source per-package if none

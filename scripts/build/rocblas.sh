@@ -2,7 +2,7 @@
 # Builds rocBLAS from source for the legacy GCN arches (gfx900/gfx906/gfx90c)
 # wherever the base image's prebuilt rocBLAS can't be trusted to serve them:
 #   - release builds (ROCM_RELEASE set) always rebuild. AMD's pinned stable
-#     bases ship no kernels for these arches at all (7.14, 10.0 and 10.1
+#     bases ship no kernels for these arches at all (7.14 and 10.0 through 10.2
 #     stable have no gfx900/gfx906/gfx90c blas packages), and upstream marks
 #     them build-passing but not sanity-tested (TheRock SUPPORTED_GPUS.md), so
 #     a version-targeted build never trusts the prebuilt.

@@ -6,13 +6,13 @@ name: Release build
 # version) to an immutable ROCm line via workflow inputs, no Dockerfile edit
 # required.
 #
-# rocm_version's major.minor (e.g. "10.1" out of "10.1.0") drives:
+# rocm_version's major.minor (e.g. "10.2" out of "10.2.0") drives:
 #   - migraphx-ref: release/rocm-rel-<major.minor>, MIGraphX's own stable
 #     branch for that ROCm line -- falling back to develop when the branch
 #     doesn't exist yet for a newer ROCm line MIGraphX hasn't branched for.
 #     The migraphx_ref input overrides this independently of rocm_version.
 #   - release-tag: rocm<major.minor>, passed through build-pipeline.yml so
-#     build-component.yml publishes a single immutable "rocm10.1-<arch>"
+#     build-component.yml publishes a single immutable "rocm10.2-<arch>"
 #     final tag instead of the develop-tracking :latest-<arch>/:<date>-<arch>
 #     pair. Point downstream consumers at that tag for a stable, reproducible
 #     build.
@@ -33,15 +33,15 @@ on:
       rocm_version:
         description: 'ROCm version to pin (X.Y.Z), matching a real rocm/dev-ubuntu-26.04 tag. Drives BASE_IMAGE, ROCM_RELEASE, and (unless migraphx_ref below overrides it) MIGRAPHX_REF.'
         required: false
-        default: '10.1.0'
+        default: '10.2.0'
       migraphx_ref:
         description: 'Git ref to build MIGraphX from (branch/tag). Leave empty to derive release/rocm-rel-<rocm_version major.minor> automatically, falling back to develop when that branch does not exist yet; set explicitly (e.g. "develop") to track it independently of rocm_version.'
         required: false
         default: ''
       pytorch_version:
-        description: 'PyTorch version to pin (X.Y.Z, no "v" prefix). Resolved in order: a clean stable release on repo.amd.com; failing that, a devreleases build (matched to this exact version and rocm_version, substituting only what AMD never gave a clean release, see rocm-devrelease-snapshot.py); failing that, a full source build. So a pin without a clean AMD release for this rocm_version still builds -- just via one of the fallback tiers instead of a stable wheel.'
+        description: 'PyTorch version to pin (X.Y.Z, no "v" prefix). Resolved in order: a clean stable release on the AMD stable index (repo.amd.com for 7.x, stable.repo.amd.com for 10.x); failing that, a devreleases build (matched to this exact version and rocm_version, substituting only what AMD never gave a clean release, see rocm-devrelease-snapshot.py); failing that, a full source build. So a pin without a clean AMD release for this rocm_version still builds -- just via one of the fallback tiers instead of a stable wheel.'
         required: false
-        default: '2.14.0'
+        default: '2.15.0'
       ort_version:
         description: 'ONNX Runtime git tag to build (e.g. "v1.29.0").'
         required: false

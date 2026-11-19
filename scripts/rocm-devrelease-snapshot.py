@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tier-2 PyTorch prebuilt-wheel fallback -- only reached after the real stable-release index
-(repo.amd.com/rocm/whl-multi-arch) has no build for the exact pinned PyTorch/ROCm version.
+(repo.amd.com for 7.x, stable.repo.amd.com/rocm/whl-next for 10.x) has no build for the exact
+pinned PyTorch/ROCm version.
 Resolves ONE consistent AMD devreleases snapshot across every ROCm-versioned package PyTorch
 needs, rather than letting each package pick its own newest build independently.
 
